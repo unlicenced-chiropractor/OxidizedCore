@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+client/dist/
+server/dist/
+
+# Vite / tooling cache
+client/node_modules/.vite/
+*.tsbuildinfo
+
+# Environment (keep *.example tracked)
+.env
+.env.local
+.env.*.local
+server/.env
+!.env.example
+!server/.env.example
+
+# Local runtime data (DB, Steam, instances — never commit)
+server/data/
+data/
+
+# SQLite temp files (if ever beside the repo)
+*.db-shm
+*.db-wal
+
+# Logs & debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE / editors
+.idea/
+*.swp
+*.swo
+*~
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Misc
+*.local

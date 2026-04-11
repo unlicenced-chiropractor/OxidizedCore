@@ -1,0 +1,53 @@
+# Dockge / homelab: set env in the UI or an `.env` file next to this compose file.
+# Published port defaults to 3001 → container 3001 (avoids clashes with Steam CEF on 8080).
+#
+# This file builds from the Git repo (needs Dockerfile + source beside this compose).
+# To deploy WITHOUT source: build & push the image once, then on the server use the same
+# service block but replace `build: .` and `pull_policy: build` with only:
+#   image: your-registry/oxidized-core:1.0.0
+# (Docker will pull that image; copy ports/env/volumes as below.)
+
+services:
+  oxidized-core:
+    build: .
+    # Local tag only; avoids Compose trying to pull from a registry.
+    image: oxidized-core:local
+    # Build from Dockerfile instead of inspecting/pulling a remote image (helps when the engine misbehaves on image JSON).
+    pull_policy: build
+    container_name: oxidized-core
+    ports:
+      - "${OXIDIZED_PORT:-3001}:3001"
+      # Rust: game + query are UDP; RCON (web) is TCP. Defaults match the panel (game 28015, RCON 28016).
+      # OxidizedCore sets query UDP to 28017 when RCON is 28016 (avoids default query=28016 clash).
+      # Change these if you use different ports in the UI; Windows Firewall must allow the same UDP/TCP.
+      - "28015:28015/udp"
+      - "28015:28015/tcp"
+      - "28017:28017/udp"
+      - "28016:28016/tcp"
+      # Rust+ companion (TCP) — default max(game+67, rcon+67) = 28083 for 28015/28016; change with your ports
+      - "28083:28083/tcp"
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      # One volume: DB, instances/<slug>/ per server, instances/_shared/ for Steam Rust + optional SteamCMD cache
+      SQLITE_PATH: /data/oxidized.db
+      # Default install dir is /data/instances/_shared/rust-dedicated (override if you use a host path)
+      # RUST_DS_INSTALL_DIR: /data/instances/_shared/rust-dedicated
+      # Optional; image preinstalls under /opt. If missing, app may download SteamCMD to instances/_shared/steamcmd.
+      # STEAMCMD_SCRIPT: /opt/steamcmd/steamcmd.sh
+      # OXIDIZED_STEAMCMD_DIR: /data/instances/_shared/steamcmd
+      # Dev / CI only: skip Steam and use a mock process
+      # OXIDIZED_SKIP_STEAM_INSTALL: "1"
+      # Override auto-detected binary (optional)
+      # OXIDIZED_RUSTDEDICATED_BIN: /custom/RustDedicated
+      # Behind NPM, Traefik, Caddy, etc. set to 1 so Express respects X-Forwarded-* headers
+      TRUST_PROXY: "${TRUST_PROXY:-0}"
+      # Optional: lock CORS/Socket.IO to your public URL(s), comma-separated
+      # CORS_ORIGIN: "https://oxidized.example.com"
+    volumes:
+      - oxidized-core-data:/data
+    restart: unless-stopped
+
+volumes:
+  oxidized-core-data:

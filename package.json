@@ -1,0 +1,19 @@
+{
+  "name": "oxidized-core",
+  "private": true,
+  "description": "Dashboard for managing Rust game servers (Vue + Express + Socket.IO + RCON + SQLite)",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently -n client,server -c cyan,magenta \"npm run dev -w client\" \"npm run dev -w server\"",
+    "build": "npm run build -w client && npm run build -w server",
+    "start": "npm run start -w server",
+    "docker:build": "docker build -t oxidized-core:local .",
+    "docker:up": "docker compose up -d --build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

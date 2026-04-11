@@ -1,0 +1,498 @@
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
+import cors from 'cors'
+import dotenv from 'dotenv'
+import express from 'express'
+import { createServer } from 'node:http'
+import { Server as SocketIOServer } from 'socket.io'
+import {
+  deleteServer,
+  getDb,
+  getServer,
+  insertServer,
+  listServers,
+  setServerStatus,
+  toPublic,
+  updateServer,
+} from './db.js'
+import { getInstanceDir, getInstancesRoot } from './instancePaths.js'
+import {
+  reconcileOrphanStatuses,
+  startInstance,
+  stopInstance,
+  stopInstanceSyncIfRunning,
+} from './instanceSupervisor.js'
+import { sendRconCommand } from './rcon.js'
+import { coreLog, coreWarn } from './log.js'
+import { setLogBroadcasters } from './logBroadcaster.js'
+import { getServerStdoutLogPath, tailTextFile } from './serverLogs.js'
+import {
+  getRustInstallSnapshot,
+  initRustInstallState,
+  scheduleRustDedicatedInstall,
+  setRustInstallStateNotifier,
+} from './steamRust.js'
+import { resolveProceduralMapPreview } from './rustMapsPreview.js'
+import { getAppSettingsPublic, getRustmapsApiKey, setRustmapsApiKey } from './appSettings.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+dotenv.config({ path: path.join(__dirname, '..', '.env') })
+
+const PORT = Number(process.env.PORT) || 3001
+const HOST = process.env.HOST || '0.0.0.0'
+/** Game + RCON processes run in this container; RCON client targets loopback. */
+const LOCAL_GAME_HOST = (process.env.LOCAL_GAME_HOST ?? '127.0.0.1').trim() || '127.0.0.1'
+const SQLITE_PATH = path.resolve(
+  process.env.SQLITE_PATH || path.join(__dirname, '..', 'data', 'oxidized.db')
+)
+
+const serveStaticExplicit = process.env.SERVE_STATIC === '1'
+const serveStaticProdDefault =
+  process.env.NODE_ENV === 'production' && process.env.SERVE_STATIC !== '0'
+const SERVE_STATIC = serveStaticExplicit || serveStaticProdDefault
+
+const staticDir = process.env.STATIC_PATH
+  ? path.resolve(process.env.STATIC_PATH)
+  : path.join(__dirname, '..', 'static')
+
+const staticAvailable = SERVE_STATIC && fs.existsSync(path.join(staticDir, 'index.html'))
+
+function corsConfig(): cors.CorsOptions {
+  const raw = process.env.CORS_ORIGIN?.trim()
+  if (raw === 'true') return { origin: true, credentials: true }
+  if (raw && raw !== '') {
+    const list = raw.split(',').map((s) => s.trim()).filter(Boolean)
+    return {
+      origin: list.length > 1 ? list : list[0]!,
+      credentials: true,
+    }
+  }
+  if (staticAvailable) return { origin: true, credentials: true }
+  return {
+    origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+    credentials: true,
+  }
+}
+
+const corsOpts = corsConfig()
+const ioCorsOrigin =
+  typeof corsOpts.origin === 'boolean'
+    ? corsOpts.origin
+    : (corsOpts.origin as string | string[] | undefined)
+
+coreLog('boot', 'Starting OxidizedCore server', {
+  node: process.version,
+  cwd: process.cwd(),
+  platform: process.platform,
+  NODE_ENV: process.env.NODE_ENV ?? '(unset)',
+})
+
+const database = getDb(SQLITE_PATH)
+coreLog('boot', 'SQLite database open', { SQLITE_PATH })
+initRustInstallState()
+
+const app = express()
+if (process.env.TRUST_PROXY === '1') {
+  app.set('trust proxy', 1)
+}
+const httpServer = createServer(app)
+
+const io = new SocketIOServer(httpServer, {
+  cors: { origin: ioCorsOrigin === true ? true : ioCorsOrigin, methods: ['GET', 'POST'] },
+})
+
+app.use(cors(corsOpts))
+app.use(express.json())
+
+function emitServersUpdated() {
+  io.emit('servers:updated', { servers: listServers(database).map(toPublic) })
+}
+
+function emitSystemRust() {
+  io.emit('system:rust', getRustInstallSnapshot())
+}
+
+setRustInstallStateNotifier(emitSystemRust)
+
+setLogBroadcasters({
+  gameLog(serverId, stream, text) {
+    io.to(`server:${serverId}`).emit('server:log', { serverId, stream, text })
+  },
+  steamLog(text) {
+    io.emit('system:steamcmd', { text })
+  },
+})
+
+reconcileOrphanStatuses(database, emitServersUpdated)
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true })
+})
+
+app.get('/api/system', (_req, res) => {
+  res.json({ rust: getRustInstallSnapshot() })
+})
+
+app.get('/api/settings', (_req, res) => {
+  res.json(getAppSettingsPublic(database))
+})
+
+app.patch('/api/settings', (req, res) => {
+  const { rustmapsApiKey } = req.body ?? {}
+  if (rustmapsApiKey !== undefined && rustmapsApiKey !== null && typeof rustmapsApiKey !== 'string') {
+    res.status(400).json({ error: 'rustmapsApiKey must be a string' })
+    return
+  }
+  if (typeof rustmapsApiKey === 'string') {
+    setRustmapsApiKey(database, rustmapsApiKey.length ? rustmapsApiKey : null)
+  }
+  coreLog('api', 'PATCH /api/settings', { rustmapsKeyUpdated: typeof rustmapsApiKey === 'string' })
+  res.json(getAppSettingsPublic(database))
+})
+
+app.get('/api/map-preview', async (req, res) => {
+  const seed = Number(req.query.seed)
+  const worldsize = Number(req.query.worldsize)
+  const staging = req.query.staging === '1' || req.query.staging === 'true'
+  if (!Number.isFinite(seed) || seed < 0 || seed > 2147483647) {
+    res.status(400).json({ error: 'Invalid seed (0–2147483647)' })
+    return
+  }
+  if (!Number.isFinite(worldsize) || worldsize < 1000 || worldsize > 6000) {
+    res.status(400).json({ error: 'Invalid map size (1000–6000)' })
+    return
+  }
+  try {
+    const result = await resolveProceduralMapPreview({
+      seed,
+      worldsize,
+      staging,
+      apiKey: getRustmapsApiKey(database),
+    })
+    if (!result.ok) {
+      const status =
+        result.code === 'no_api_key'
+          ? 503
+          : result.code === 'unauthorized'
+            ? 502
+            : result.code === 'bad_request'
+              ? 400
+              : 504
+      const message =
+        result.code === 'no_api_key'
+          ? 'Add a RustMaps API key in Settings (get one from rustmaps.com).'
+          : result.message
+      res.status(status).json({ ok: false, code: result.code, message })
+      return
+    }
+    res.json({ ok: true, thumbnailUrl: result.thumbnailUrl })
+  } catch (e) {
+    coreWarn('api', 'map-preview failed', { message: e instanceof Error ? e.message : String(e) })
+    res.status(500).json({ ok: false, code: 'upstream', message: 'Preview request failed' })
+  }
+})
+
+app.get('/api/servers', (_req, res) => {
+  res.json({ servers: listServers(database).map(toPublic) })
+})
+
+/** Last ~512KB of captured game process stdout/stderr (see instance logs/stdout.log). */
+app.get('/api/servers/:id/logs', (req, res) => {
+  const id = Number(req.params.id)
+  const server = Number.isFinite(id) ? getServer(database, id) : undefined
+  if (!server?.instance_slug) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  const text = tailTextFile(getServerStdoutLogPath(server))
+  res.json({ text })
+})
+
+app.post('/api/servers', (req, res) => {
+  const { name, game_port, rcon_port, rcon_password, map_seed, map_worldsize } = req.body ?? {}
+  coreLog('api', 'POST /api/servers (create)', { name, game_port, rcon_port, map_seed, map_worldsize })
+  if (
+    typeof name !== 'string' ||
+    typeof game_port !== 'number' ||
+    typeof rcon_port !== 'number' ||
+    typeof rcon_password !== 'string' ||
+    typeof map_seed !== 'number' ||
+    typeof map_worldsize !== 'number'
+  ) {
+    res.status(400).json({ error: 'Invalid body' })
+    return
+  }
+  if (map_seed < 0 || map_seed > 2147483647 || !Number.isInteger(map_seed)) {
+    res.status(400).json({ error: 'Invalid map_seed' })
+    return
+  }
+  if (map_worldsize < 1000 || map_worldsize > 6000 || !Number.isInteger(map_worldsize)) {
+    res.status(400).json({ error: 'Invalid map_worldsize' })
+    return
+  }
+  const row = insertServer(database, {
+    name,
+    host: LOCAL_GAME_HOST,
+    game_port,
+    rcon_port,
+    rcon_password,
+    map_seed,
+    map_worldsize,
+    status: 'stopped',
+  })
+  emitServersUpdated()
+  coreLog('api', 'Server row created; scheduling shared Rust Steam install if needed', { id: row.id })
+  scheduleRustDedicatedInstall(() => {
+    emitServersUpdated()
+    emitSystemRust()
+  })
+  res.status(201).json({ server: toPublic(row) })
+})
+
+app.patch('/api/servers/:id', (req, res) => {
+  const id = Number(req.params.id)
+  coreLog('api', 'PATCH /api/servers/:id', { id, bodyKeys: req.body ? Object.keys(req.body) : [] })
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  const existing = getServer(database, id)
+  if (!existing) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  if (existing.status === 'running' || existing.status === 'starting') {
+    const { game_port, rcon_port, host } = req.body ?? {}
+    if (typeof game_port === 'number' && game_port !== existing.game_port) {
+      res.status(409).json({ error: 'Stop the server before changing ports' })
+      return
+    }
+    if (typeof rcon_port === 'number' && rcon_port !== existing.rcon_port) {
+      res.status(409).json({ error: 'Stop the server before changing ports' })
+      return
+    }
+    if (typeof host === 'string' && host !== existing.host) {
+      res.status(409).json({ error: 'Stop the server before changing host' })
+      return
+    }
+    const { map_seed: ms, map_worldsize: mw } = req.body ?? {}
+    if (typeof ms === 'number' && ms !== existing.map_seed) {
+      res.status(409).json({ error: 'Stop the server before changing map' })
+      return
+    }
+    if (typeof mw === 'number' && mw !== existing.map_worldsize) {
+      res.status(409).json({ error: 'Stop the server before changing map' })
+      return
+    }
+  }
+  const { name, host, game_port, rcon_port, rcon_password, map_seed, map_worldsize } = req.body ?? {}
+  const patch: Parameters<typeof updateServer>[2] = {}
+  if (typeof name === 'string') patch.name = name
+  if (typeof host === 'string') patch.host = host
+  if (typeof game_port === 'number') patch.game_port = game_port
+  if (typeof rcon_port === 'number') patch.rcon_port = rcon_port
+  if (typeof rcon_password === 'string') patch.rcon_password = rcon_password
+  if (typeof map_seed === 'number') {
+    if (map_seed < 0 || map_seed > 2147483647 || !Number.isInteger(map_seed)) {
+      res.status(400).json({ error: 'Invalid map_seed' })
+      return
+    }
+    patch.map_seed = map_seed
+  }
+  if (typeof map_worldsize === 'number') {
+    if (map_worldsize < 1000 || map_worldsize > 6000 || !Number.isInteger(map_worldsize)) {
+      res.status(400).json({ error: 'Invalid map_worldsize' })
+      return
+    }
+    patch.map_worldsize = map_worldsize
+  }
+  const updated = updateServer(database, id, patch)
+  if (!updated) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  emitServersUpdated()
+  res.json({ server: toPublic(updated) })
+})
+
+app.post('/api/servers/:id/start', async (req, res) => {
+  const id = Number(req.params.id)
+  coreLog('api', 'POST /api/servers/:id/start', { id })
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  const server = getServer(database, id)
+  if (!server) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  const result = await startInstance(server, database, emitServersUpdated)
+  if (!result.ok) {
+    coreWarn('api', 'Start failed', { id, error: result.error })
+    res.status(result.error === 'Already running' ? 409 : 500).json({ error: result.error })
+    return
+  }
+  coreLog('api', 'Start OK', { id })
+  const row = getServer(database, id)
+  res.json({ server: row ? toPublic(row) : undefined })
+})
+
+app.post('/api/servers/:id/stop', (req, res) => {
+  const id = Number(req.params.id)
+  coreLog('api', 'POST /api/servers/:id/stop', { id })
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  if (!getServer(database, id)) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  const result = stopInstance(id, database, emitServersUpdated)
+  if (!result.ok) {
+    res.status(500).json({ error: result.error })
+    return
+  }
+  const row = getServer(database, id)
+  res.json({ server: row ? toPublic(row) : undefined })
+})
+
+app.delete('/api/servers/:id', (req, res) => {
+  const id = Number(req.params.id)
+  coreLog('api', 'DELETE /api/servers/:id', { id })
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  const toRemove = getServer(database, id)
+  if (!toRemove?.instance_slug) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  stopInstanceSyncIfRunning(id)
+  setServerStatus(database, id, 'stopped')
+  try {
+    fs.rmSync(getInstanceDir(toRemove), { recursive: true, force: true })
+  } catch {
+    /* ignore */
+  }
+  const ok = deleteServer(database, id)
+  if (!ok) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  emitServersUpdated()
+  res.status(204).end()
+})
+
+app.post('/api/servers/:id/rcon', async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  const server = getServer(database, id)
+  if (!server) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  if (server.status !== 'running') {
+    res.status(409).json({ error: 'Start the server before using RCON' })
+    return
+  }
+  const command = typeof req.body?.command === 'string' ? req.body.command.trim() : ''
+  coreLog('api', 'POST /api/servers/:id/rcon', { id, commandPreview: command.slice(0, 80) })
+  if (!command) {
+    res.status(400).json({ error: 'command required' })
+    return
+  }
+  const result = await sendRconCommand(server.host, server.rcon_port, server.rcon_password, command)
+  if (!result.ok) {
+    coreWarn('api', 'RCON failed', { id, error: result.error })
+    res.status(502).json({ error: result.error })
+    return
+  }
+  coreLog('api', 'RCON OK', { id, responseChars: result.response.length })
+  res.json({ response: result.response })
+})
+
+io.on('connection', (socket) => {
+  coreLog('socket', 'Client connected', { id: socket.id })
+  socket.emit('servers:updated', { servers: listServers(database).map(toPublic) })
+  socket.emit('system:rust', getRustInstallSnapshot())
+
+  socket.on('logs:subscribe', (payload: { serverIds?: unknown }) => {
+    const raw = payload?.serverIds
+    const ids = Array.isArray(raw) ? raw : []
+    for (const x of ids) {
+      const id = typeof x === 'number' ? x : Number(x)
+      if (Number.isFinite(id) && id > 0) {
+        void socket.join(`server:${id}`)
+      }
+    }
+    if (ids.length) {
+      coreLog('socket', 'logs:subscribe', { socketId: socket.id, serverIds: ids })
+    }
+  })
+
+  socket.on('logs:unsubscribe', (payload: { serverIds?: unknown }) => {
+    const raw = payload?.serverIds
+    const ids = Array.isArray(raw) ? raw : []
+    for (const x of ids) {
+      const id = typeof x === 'number' ? x : Number(x)
+      if (Number.isFinite(id) && id > 0) {
+        void socket.leave(`server:${id}`)
+      }
+    }
+  })
+
+  socket.on('disconnect', (reason) => {
+    coreLog('socket', 'Client disconnected', { id: socket.id, reason })
+  })
+})
+
+if (staticAvailable) {
+  app.use(express.static(staticDir, { index: false }))
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      next()
+      return
+    }
+    if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) {
+      next()
+      return
+    }
+    const ext = path.extname(req.path)
+    if (ext !== '' && ext !== '.html') {
+      next()
+      return
+    }
+    res.sendFile(path.join(staticDir, 'index.html'), (err) => {
+      if (err) next(err)
+    })
+  })
+} else if (SERVE_STATIC) {
+  coreWarn('boot', 'SERVE_STATIC is on but no UI found — API only', { staticDir })
+}
+
+httpServer.listen(PORT, HOST, () => {
+  const where = HOST === '0.0.0.0' ? 'all interfaces' : HOST
+  coreLog('boot', 'HTTP + Socket.IO listening', {
+    url: `http://${HOST}:${PORT}`,
+    bind: where,
+    PORT,
+    HOST,
+  })
+  coreLog('boot', 'Paths', {
+    instances: getInstancesRoot(),
+    staticDir,
+    serveStatic: staticAvailable,
+    trustProxy: process.env.TRUST_PROXY === '1',
+  })
+  coreLog('boot', 'Game / RCON', {
+    LOCAL_GAME_HOST,
+    rustSnapshot: getRustInstallSnapshot(),
+  })
+})

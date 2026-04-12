@@ -1,4 +1,4 @@
-/** RustMaps.com API — procedural map preview (thumbnail). Key comes from app settings (SQLite). */
+/** RustMaps.com API — procedural map preview. Key comes from app settings (SQLite). */
 
 const DEFAULT_API = 'https://api.rustmaps.com/v4'
 
@@ -34,9 +34,10 @@ async function fetchJson(url: string, init: RequestInit): Promise<{ status: numb
   return { status: res.status, json }
 }
 
+/** Prefer larger preview assets so the UI can scale without heavy upscaling blur. */
 function pickThumb(data: MapsData | undefined): string | undefined {
   if (!data) return undefined
-  const u = data.thumbnailUrl || data.imageUrl || data.rawImageUrl
+  const u = data.imageUrl || data.rawImageUrl || data.thumbnailUrl
   return typeof u === 'string' && u.length > 0 ? u : undefined
 }
 

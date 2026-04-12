@@ -1,14 +1,16 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import type { GameServerRow } from './db.js'
 import { redactRustLaunchArgs, coreLog } from './log.js'
 import { ensureSteamClientSdk64 } from './steamClientRuntime.js'
+import { isWindowsHost } from './hostPlatform.js'
 import {
   getRustDedicatedBinaryPath,
   isRustDedicatedBinaryPresent,
   skipSteamInstall,
 } from './steamRust.js'
-import { effectiveQueryPort } from './rustPorts.js'
+import { effectiveQueryPort, rustCompanionTcpPort } from './rustPorts.js'
 
 export type LaunchSpec = {
   command: string
@@ -31,7 +33,7 @@ export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string):
       : null
 
   if (exe && fs.existsSync(exe)) {
-    const steamLinux64 = ensureSteamClientSdk64()
+    const steamLinux64 = isWindowsHost() ? undefined : ensureSteamClientSdk64()
     const ldPath = [steamLinux64, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':')
 
     const installDir = path.dirname(exe)
@@ -41,7 +43,9 @@ export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string):
       : installDir
 
     const queryPort = effectiveQueryPort(server.game_port, server.rcon_port)
-    const args = [
+    const companionPort = rustCompanionTcpPort(server.game_port, server.rcon_port)
+    const desc = server.server_description.trim() || ' '
+    const args: string[] = [
       '-batchmode',
       '-nographics',
       '+server.ip',
@@ -50,8 +54,15 @@ export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string):
       String(server.game_port),
       '+server.queryport',
       String(queryPort),
+      ...(server.companion_enabled !== 0
+        ? ['+app.port', String(companionPort)]
+        : ['+app.port', '1-']),
       '+server.hostname',
       server.name,
+      '+server.description',
+      desc,
+      '+server.maxplayers',
+      String(server.max_players),
       '+server.level',
       'Procedural Map',
       '+server.seed',
@@ -60,19 +71,21 @@ export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string):
       String(server.map_worldsize),
       '+server.identity',
       identity,
-      '+rcon.web',
-      '1',
-      '+rcon.ip',
-      '0.0.0.0',
-      '+rcon.port',
-      String(server.rcon_port),
-      '+rcon.password',
-      server.rcon_password,
-      '+server.saveinterval',
-      '300',
-      '-logfile',
-      path.join(instanceDir, 'logs', 'RustDedicated.log'),
     ]
+    if (server.rcon_enabled !== 0) {
+      // Source-style TCP RCON (rcon-client); +rcon.web 1 is WebSocket JSON and is incompatible.
+      args.push(
+        '+rcon.web',
+        '0',
+        '+rcon.ip',
+        '0.0.0.0',
+        '+rcon.port',
+        String(server.rcon_port),
+        '+rcon.password',
+        server.rcon_password
+      )
+    }
+    args.push('+server.saveinterval', '300', '-logfile', path.join(instanceDir, 'logs', 'RustDedicated.log'))
     const publicIp = process.env.OXIDIZED_APP_PUBLICIP?.trim()
     if (publicIp) {
       args.push('+app.publicip', publicIp)
@@ -84,7 +97,9 @@ export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string):
       cwd,
       env: {
         ...process.env,
-        HOME: process.env.HOME || '/root',
+        HOME:
+          process.env.HOME ||
+          (isWindowsHost() ? process.env.USERPROFILE || os.homedir() : '/root'),
         ...(ldPath ? { LD_LIBRARY_PATH: ldPath } : {}),
         OXIDIZED_INSTANCE_ID: String(server.id),
         OXIDIZED_INSTANCE_DIR: instanceDir,
@@ -97,6 +112,7 @@ export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string):
       gameUdp: server.game_port,
       queryUdp: queryPort,
       rconTcp: server.rcon_port,
+      rustPlus: server.companion_enabled !== 0 ? companionPort : 'off',
       args: redactRustLaunchArgs(spec.args),
     })
     return spec

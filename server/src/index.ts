@@ -26,7 +26,7 @@ import {
 import { sendRconCommand } from './rcon.js'
 import { coreLog, coreWarn } from './log.js'
 import { setLogBroadcasters } from './logBroadcaster.js'
-import { getServerStdoutLogPath, tailTextFile } from './serverLogs.js'
+import { getCombinedServerLogTail } from './serverLogs.js'
 import {
   getRustInstallSnapshot,
   initRustInstallState,
@@ -35,6 +35,9 @@ import {
 } from './steamRust.js'
 import { resolveProceduralMapPreview } from './rustMapsPreview.js'
 import { getAppSettingsPublic, getRustmapsApiKey, setRustmapsApiKey } from './appSettings.js'
+import { detectOxidePresentOnDisk } from './oxideInstall.js'
+import { fetchUmodPluginsPage } from './umodCatalog.js'
+import { searchOxideRelatedRepos } from './githubPlugins.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.join(__dirname, '..', '.env') })
@@ -131,7 +134,71 @@ app.get('/api/health', (_req, res) => {
 })
 
 app.get('/api/system', (_req, res) => {
-  res.json({ rust: getRustInstallSnapshot() })
+  res.json({
+    rust: getRustInstallSnapshot(),
+    oxideInstalled: detectOxidePresentOnDisk(),
+  })
+})
+
+app.get('/api/github/oxide-plugins', async (req, res) => {
+  const page = Number(req.query.page)
+  const p = Number.isFinite(page) ? Math.floor(page) : 1
+  const sortRaw = typeof req.query.sort === 'string' ? req.query.sort.trim() : 'stars'
+  const sort =
+    sortRaw === 'updated' || sortRaw === 'best-match' ? sortRaw : 'stars'
+  const order = req.query.order === 'asc' ? 'asc' : 'desc'
+  const q = typeof req.query.q === 'string' && req.query.q.trim() ? req.query.q.trim().slice(0, 256) : undefined
+  try {
+    const result = await searchOxideRelatedRepos({ page: p, sort, order, query: q })
+    if (!result.ok) {
+      res.status(502).json({
+        ok: false,
+        error: result.error,
+        rateLimitRemaining: result.rateLimitRemaining,
+      })
+      return
+    }
+    res.json({
+      ok: true,
+      page: result.page,
+      perPage: result.perPage,
+      totalCount: result.totalCount,
+      hasNext: result.hasNext,
+      rateLimitRemaining: result.rateLimitRemaining,
+      items: result.items,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    coreWarn('api', 'GET /api/github/oxide-plugins failed', { message: msg })
+    res.status(500).json({ ok: false, error: msg })
+  }
+})
+
+app.get('/api/umod/plugins', async (req, res) => {
+  const page = Number(req.query.page)
+  const p = Number.isFinite(page) ? Math.min(500, Math.max(1, Math.floor(page))) : 1
+  const sortRaw = typeof req.query.sort === 'string' ? req.query.sort.trim() : 'title'
+  const sort = /^[a-z0-9_-]{1,32}$/i.test(sortRaw) ? sortRaw : 'title'
+  const sortdir = req.query.sortdir === 'desc' ? 'desc' : 'asc'
+  try {
+    const result = await fetchUmodPluginsPage({ page: p, sort, sortdir })
+    res.json({
+      ok: true,
+      blocked: false,
+      source: result.source,
+      note: result.note,
+      catalogUrl: result.catalogUrl,
+      page: result.page,
+      sort,
+      sortdir,
+      plugins: result.plugins,
+      hasNext: result.hasNext,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    coreWarn('api', 'GET /api/umod/plugins failed', { message: msg })
+    res.status(500).json({ ok: false, error: msg })
+  }
 })
 
 app.get('/api/settings', (_req, res) => {
@@ -197,7 +264,7 @@ app.get('/api/servers', (_req, res) => {
   res.json({ servers: listServers(database).map(toPublic) })
 })
 
-/** Last ~512KB of captured game process stdout/stderr (see instance logs/stdout.log). */
+/** Last ~512KB each of stdout/stderr pipe capture and RustDedicated.log (game). */
 app.get('/api/servers/:id/logs', (req, res) => {
   const id = Number(req.params.id)
   const server = Number.isFinite(id) ? getServer(database, id) : undefined
@@ -205,12 +272,26 @@ app.get('/api/servers/:id/logs', (req, res) => {
     res.status(404).json({ error: 'Not found' })
     return
   }
-  const text = tailTextFile(getServerStdoutLogPath(server))
+  const text = getCombinedServerLogTail(server)
   res.json({ text })
 })
 
 app.post('/api/servers', (req, res) => {
-  const { name, game_port, rcon_port, rcon_password, map_seed, map_worldsize } = req.body ?? {}
+  const {
+    name,
+    game_port,
+    rcon_port,
+    rcon_password,
+    map_seed,
+    map_worldsize,
+    host: bodyHost,
+    max_players: bodyMaxPlayers,
+    server_description: bodyDescription,
+    rcon_enabled: bodyRconEnabled,
+    oxide_enabled: bodyOxideEnabled,
+    companion_enabled: bodyCompanionEnabled,
+    memory_limit_mb: bodyMemoryLimitMb,
+  } = req.body ?? {}
   coreLog('api', 'POST /api/servers (create)', { name, game_port, rcon_port, map_seed, map_worldsize })
   if (
     typeof name !== 'string' ||
@@ -223,6 +304,21 @@ app.post('/api/servers', (req, res) => {
     res.status(400).json({ error: 'Invalid body' })
     return
   }
+  const rconEnabled = bodyRconEnabled === false ? false : true
+  const oxideEnabled = bodyOxideEnabled === true
+  const companionEnabled = bodyCompanionEnabled === false ? false : true
+  const maxPlayers =
+    typeof bodyMaxPlayers === 'number' && Number.isInteger(bodyMaxPlayers) ? bodyMaxPlayers : 100
+  const serverDescription =
+    typeof bodyDescription === 'string' ? bodyDescription.trim().slice(0, 512) : ''
+  if (maxPlayers < 1 || maxPlayers > 500) {
+    res.status(400).json({ error: 'Invalid max_players (1–500)' })
+    return
+  }
+  if (rconEnabled && !rcon_password.trim()) {
+    res.status(400).json({ error: 'RCON password required when RCON is enabled' })
+    return
+  }
   if (map_seed < 0 || map_seed > 2147483647 || !Number.isInteger(map_seed)) {
     res.status(400).json({ error: 'Invalid map_seed' })
     return
@@ -231,14 +327,41 @@ app.post('/api/servers', (req, res) => {
     res.status(400).json({ error: 'Invalid map_worldsize' })
     return
   }
+  let memoryLimitMb: number | null = null
+  if (bodyMemoryLimitMb !== undefined && bodyMemoryLimitMb !== null && bodyMemoryLimitMb !== '') {
+    if (typeof bodyMemoryLimitMb !== 'number' || !Number.isInteger(bodyMemoryLimitMb)) {
+      res.status(400).json({ error: 'memory_limit_mb must be an integer (MiB) or null' })
+      return
+    }
+    if (bodyMemoryLimitMb < 512 || bodyMemoryLimitMb > 262_144) {
+      res.status(400).json({ error: 'memory_limit_mb must be between 512 and 262144 MiB' })
+      return
+    }
+    memoryLimitMb = bodyMemoryLimitMb
+  }
+  let host = LOCAL_GAME_HOST
+  if (typeof bodyHost === 'string') {
+    const h = bodyHost.trim()
+    if (h.length > 253) {
+      res.status(400).json({ error: 'Invalid host' })
+      return
+    }
+    if (h.length > 0) host = h
+  }
   const row = insertServer(database, {
     name,
-    host: LOCAL_GAME_HOST,
+    host,
     game_port,
     rcon_port,
-    rcon_password,
+    rcon_password: rconEnabled ? rcon_password : '',
+    rcon_enabled: rconEnabled ? 1 : 0,
+    oxide_enabled: oxideEnabled ? 1 : 0,
+    companion_enabled: companionEnabled ? 1 : 0,
     map_seed,
     map_worldsize,
+    max_players: maxPlayers,
+    server_description: serverDescription,
+    memory_limit_mb: memoryLimitMb,
     status: 'stopped',
   })
   emitServersUpdated()
@@ -263,7 +386,7 @@ app.patch('/api/servers/:id', (req, res) => {
     return
   }
   if (existing.status === 'running' || existing.status === 'starting') {
-    const { game_port, rcon_port, host } = req.body ?? {}
+    const { game_port, rcon_port, host, rcon_enabled: re } = req.body ?? {}
     if (typeof game_port === 'number' && game_port !== existing.game_port) {
       res.status(409).json({ error: 'Stop the server before changing ports' })
       return
@@ -276,6 +399,14 @@ app.patch('/api/servers/:id', (req, res) => {
       res.status(409).json({ error: 'Stop the server before changing host' })
       return
     }
+    if (typeof re === 'boolean' && re !== (existing.rcon_enabled !== 0)) {
+      res.status(409).json({ error: 'Stop the server before changing RCON settings' })
+      return
+    }
+    if (typeof req.body?.rcon_password === 'string' && req.body.rcon_password !== existing.rcon_password) {
+      res.status(409).json({ error: 'Stop the server before changing RCON password' })
+      return
+    }
     const { map_seed: ms, map_worldsize: mw } = req.body ?? {}
     if (typeof ms === 'number' && ms !== existing.map_seed) {
       res.status(409).json({ error: 'Stop the server before changing map' })
@@ -285,8 +416,52 @@ app.patch('/api/servers/:id', (req, res) => {
       res.status(409).json({ error: 'Stop the server before changing map' })
       return
     }
+    const { oxide_enabled: ox } = req.body ?? {}
+    if (typeof ox === 'boolean' && ox !== (existing.oxide_enabled !== 0)) {
+      res.status(409).json({ error: 'Stop the server before changing Oxide' })
+      return
+    }
+    const { companion_enabled: co } = req.body ?? {}
+    if (typeof co === 'boolean' && co !== (existing.companion_enabled !== 0)) {
+      res.status(409).json({ error: 'Stop the server before changing Rust+' })
+      return
+    }
+    if ('memory_limit_mb' in (req.body ?? {})) {
+      const raw = req.body.memory_limit_mb
+      let nextMem: number | null
+      if (raw === null || raw === undefined || raw === '') nextMem = null
+      else if (typeof raw === 'number' && Number.isInteger(raw)) {
+        if (raw < 512 || raw > 262_144) {
+          res.status(400).json({ error: 'memory_limit_mb must be 512–262144 MiB or null' })
+          return
+        }
+        nextMem = raw
+      } else {
+        res.status(400).json({ error: 'memory_limit_mb must be an integer or null' })
+        return
+      }
+      const curMem = existing.memory_limit_mb ?? null
+      if (nextMem !== curMem) {
+        res.status(409).json({ error: 'Stop the server before changing RAM limit' })
+        return
+      }
+    }
   }
-  const { name, host, game_port, rcon_port, rcon_password, map_seed, map_worldsize } = req.body ?? {}
+  const {
+    name,
+    host,
+    game_port,
+    rcon_port,
+    rcon_password,
+    map_seed,
+    map_worldsize,
+    max_players,
+    server_description,
+    rcon_enabled: bodyRconEnabled,
+    oxide_enabled: bodyOxideEnabled,
+    companion_enabled: bodyCompanionEnabled,
+    memory_limit_mb: bodyMemoryLimitMb,
+  } = req.body ?? {}
   const patch: Parameters<typeof updateServer>[2] = {}
   if (typeof name === 'string') patch.name = name
   if (typeof host === 'string') patch.host = host
@@ -306,6 +481,45 @@ app.patch('/api/servers/:id', (req, res) => {
       return
     }
     patch.map_worldsize = map_worldsize
+  }
+  if (typeof max_players === 'number') {
+    if (max_players < 1 || max_players > 500 || !Number.isInteger(max_players)) {
+      res.status(400).json({ error: 'Invalid max_players (1–500)' })
+      return
+    }
+    patch.max_players = max_players
+  }
+  if (typeof server_description === 'string') patch.server_description = server_description.trim().slice(0, 512)
+  if (typeof bodyRconEnabled === 'boolean') {
+    const wasEnabled = existing.rcon_enabled !== 0
+    if (bodyRconEnabled !== wasEnabled) {
+      patch.rcon_enabled = bodyRconEnabled ? 1 : 0
+      if (bodyRconEnabled && !(patch.rcon_password ?? existing.rcon_password).trim()) {
+        res.status(400).json({ error: 'Set an RCON password before enabling RCON' })
+        return
+      }
+      if (!bodyRconEnabled) patch.rcon_password = ''
+    }
+  }
+  if (typeof bodyOxideEnabled === 'boolean') {
+    patch.oxide_enabled = bodyOxideEnabled ? 1 : 0
+  }
+  if (typeof bodyCompanionEnabled === 'boolean') {
+    patch.companion_enabled = bodyCompanionEnabled ? 1 : 0
+  }
+  if ('memory_limit_mb' in (req.body ?? {})) {
+    const raw = bodyMemoryLimitMb
+    if (raw === null || raw === undefined || raw === '') patch.memory_limit_mb = null
+    else if (typeof raw === 'number' && Number.isInteger(raw)) {
+      if (raw < 512 || raw > 262_144) {
+        res.status(400).json({ error: 'memory_limit_mb must be 512–262144 MiB or null' })
+        return
+      }
+      patch.memory_limit_mb = raw
+    } else {
+      res.status(400).json({ error: 'memory_limit_mb must be an integer or null' })
+      return
+    }
   }
   const updated = updateServer(database, id, patch)
   if (!updated) {
@@ -400,6 +614,10 @@ app.post('/api/servers/:id/rcon', async (req, res) => {
   }
   if (server.status !== 'running') {
     res.status(409).json({ error: 'Start the server before using RCON' })
+    return
+  }
+  if (server.rcon_enabled === 0) {
+    res.status(409).json({ error: 'RCON is disabled for this server' })
     return
   }
   const command = typeof req.body?.command === 'string' ? req.body.command.trim() : ''

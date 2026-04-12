@@ -7,12 +7,59 @@ import { getInstanceDir } from './instancePaths.js'
 import { setServerStatus } from './db.js'
 import { broadcastGameLog } from './logBroadcaster.js'
 import { redactRustLaunchArgs, coreLog, coreWarn } from './log.js'
+import { applyMemoryLimitToSpawn } from './memoryLimitSpawn.js'
 import { buildRustLaunchSpec } from './rustLauncher.js'
-import { waitForRustDedicatedOrThrow } from './steamRust.js'
+import { ensureOxideInstalled } from './oxideInstall.js'
+import { getRustDedicatedInstallDir, waitForRustDedicatedOrThrow } from './steamRust.js'
 
 export type SupervisorEmit = () => void
 
 const children = new Map<number, ChildProcess>()
+/** Poll RustDedicated.log (-logfile); Unity sends little to stdout. */
+const rustDedicatedLogIntervals = new Map<number, ReturnType<typeof setInterval>>()
+
+function stopRustDedicatedLogTail(id: number): void {
+  const iv = rustDedicatedLogIntervals.get(id)
+  if (iv !== undefined) {
+    clearInterval(iv)
+    rustDedicatedLogIntervals.delete(id)
+  }
+}
+
+function startRustDedicatedLogTail(id: number, instanceDir: string): void {
+  stopRustDedicatedLogTail(id)
+  const logPath = path.join(instanceDir, 'logs', 'RustDedicated.log')
+  let pos = 0
+  try {
+    if (fs.existsSync(logPath)) pos = fs.statSync(logPath).size
+  } catch {
+    /* ignore */
+  }
+  const tick = () => {
+    try {
+      if (!fs.existsSync(logPath)) return
+      const st = fs.statSync(logPath)
+      if (st.size < pos) pos = 0
+      if (st.size <= pos) return
+      const fd = fs.openSync(logPath, 'r')
+      try {
+        const len = st.size - pos
+        const buf = Buffer.alloc(len)
+        fs.readSync(fd, buf, 0, len, pos)
+        pos = st.size
+        const text = buf.toString('utf8')
+        if (text) broadcastGameLog(id, 'stdout', text)
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const iv = setInterval(tick, 600)
+  rustDedicatedLogIntervals.set(id, iv)
+  setTimeout(tick, 800)
+}
 
 export function isInstanceRunning(id: number): boolean {
   const c = children.get(id)
@@ -27,6 +74,7 @@ function attachExitHandler(
 ) {
   child.on('exit', (code, signal) => {
     children.delete(id)
+    stopRustDedicatedLogTail(id)
     broadcastGameLog(
       id,
       'stdout',
@@ -47,6 +95,7 @@ function attachExitHandler(
   })
   child.on('error', (err) => {
     children.delete(id)
+    stopRustDedicatedLogTail(id)
     coreWarn('instance', `Game process error`, { serverId: id, message: err.message })
     setServerStatus(database, id, 'error')
     emit()
@@ -141,16 +190,48 @@ export async function startInstance(
     return { ok: false, error: msg }
   }
 
+  if (server.oxide_enabled !== 0) {
+    broadcastGameLog(
+      id,
+      'stdout',
+      '\r\n[oxidized-core] Oxide enabled — ensuring Oxide/uMod files in shared Rust install…\r\n'
+    )
+    const oxide = await ensureOxideInstalled(getRustDedicatedInstallDir(), (line) => {
+      broadcastGameLog(id, 'stdout', `\r\n[oxidized-core] ${line}\r\n`)
+    })
+    if (!oxide.ok) {
+      broadcastGameLog(id, 'stderr', `\r\n[oxidized-core] Oxide install failed: ${oxide.error}\r\n`)
+      coreWarn('instance', 'startInstance: Oxide install failed', { serverId: id, error: oxide.error })
+      setServerStatus(database, id, 'stopped')
+      emit()
+      return { ok: false, error: oxide.error }
+    }
+  }
+
   const spec = buildRustLaunchSpec(server, instanceDir)
+  const memMb = server.memory_limit_mb ?? null
+  const launched = applyMemoryLimitToSpawn({
+    command: spec.command,
+    args: spec.args,
+    memoryLimitMb: memMb,
+    serverId: id,
+  })
+  if (launched.command !== spec.command && memMb != null) {
+    broadcastGameLog(
+      id,
+      'stdout',
+      `\r\n[oxidized-core] RAM limit ${memMb} MiB (enforced via systemd-run on Linux when available)\r\n`
+    )
+  }
   let child: ChildProcess
   try {
     coreLog('instance', 'Spawning game process', {
       serverId: id,
-      command: spec.command,
+      command: launched.command,
       cwd: spec.cwd,
-      args: redactRustLaunchArgs(spec.args),
+      args: redactRustLaunchArgs(launched.args),
     })
-    child = spawn(spec.command, spec.args, {
+    child = spawn(launched.command, launched.args, {
       cwd: spec.cwd,
       env: { ...process.env, ...spec.env },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -211,6 +292,7 @@ export async function startInstance(
   }
 
   setServerStatus(database, id, 'running')
+  startRustDedicatedLogTail(id, instanceDir)
   coreLog('instance', 'Server is running', { serverId: id, pid: child.pid })
   emit()
   return { ok: true }
@@ -223,11 +305,13 @@ export function stopInstance(
 ): { ok: true } | { ok: false; error: string } {
   const child = children.get(id)
   if (!child) {
+    stopRustDedicatedLogTail(id)
     coreLog('instance', 'stopInstance: no child process (DB → stopped)', { serverId: id })
     setServerStatus(database, id, 'stopped')
     emit()
     return { ok: true }
   }
+  stopRustDedicatedLogTail(id)
   coreLog('instance', 'stopInstance: SIGTERM', { serverId: id, pid: child.pid })
   try {
     child.kill('SIGTERM')
@@ -250,6 +334,7 @@ export function stopInstance(
 }
 
 export function stopInstanceSyncIfRunning(id: number): void {
+  stopRustDedicatedLogTail(id)
   const child = children.get(id)
   if (child && !child.killed) {
     coreLog('instance', 'stopInstanceSyncIfRunning: SIGTERM', { serverId: id })

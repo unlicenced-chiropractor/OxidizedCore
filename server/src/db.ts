@@ -15,17 +15,35 @@ export type GameServerRow = {
   game_port: number
   rcon_port: number
   rcon_password: string
+  /** 0 or 1 in SQLite — pass +rcon.* only when enabled. */
+  rcon_enabled: number
+  /** 0 or 1 — merge Oxide into shared Rust install before start. */
+  oxide_enabled: number
+  /** 0 or 1 — Rust+ companion TCP (+app.port); off uses +app.port 1- */
+  companion_enabled: number
+  /** Optional RAM cap for the game process (MiB); null = unlimited. */
+  memory_limit_mb: number | null
   /** Procedural map (+server.seed). */
   map_seed: number
   /** World size (+server.worldsize), typically 1000–6000. */
   map_worldsize: number
+  /** +server.maxplayers */
+  max_players: number
+  /** +server.description */
+  server_description: string
   status: ServerStatus
   created_at: string
   /** Stable folder name under instances/ (from name at create time). */
   instance_slug: string
 }
 
-export type GameServerPublic = Omit<GameServerRow, 'rcon_password'> & {
+export type GameServerPublic = Omit<
+  GameServerRow,
+  'rcon_password' | 'rcon_enabled' | 'oxide_enabled' | 'companion_enabled'
+> & {
+  rcon_enabled: boolean
+  oxide_enabled: boolean
+  companion_enabled: boolean
   /** UDP — Steam query / server list (same rules as +server.queryport). */
   query_port: number
   /** TCP — Rust+ companion (forward for mobile app; not required for F1 connect). */
@@ -33,9 +51,12 @@ export type GameServerPublic = Omit<GameServerRow, 'rcon_password'> & {
 }
 
 export function toPublic(row: GameServerRow): GameServerPublic {
-  const { rcon_password: _p, ...rest } = row
+  const { rcon_password: _p, rcon_enabled, oxide_enabled, companion_enabled, ...rest } = row
   return {
     ...rest,
+    rcon_enabled: rcon_enabled !== 0,
+    oxide_enabled: oxide_enabled !== 0,
+    companion_enabled: companion_enabled !== 0,
     query_port: effectiveQueryPort(row.game_port, row.rcon_port),
     companion_tcp_port: rustCompanionTcpPort(row.game_port, row.rcon_port),
   }
@@ -106,6 +127,24 @@ function migrateServersTable(database: Database.Database) {
   if (!names.has('map_worldsize')) {
     database.exec(`ALTER TABLE servers ADD COLUMN map_worldsize INTEGER NOT NULL DEFAULT 3500`)
   }
+  if (!names.has('max_players')) {
+    database.exec(`ALTER TABLE servers ADD COLUMN max_players INTEGER NOT NULL DEFAULT 100`)
+  }
+  if (!names.has('server_description')) {
+    database.exec(`ALTER TABLE servers ADD COLUMN server_description TEXT NOT NULL DEFAULT ''`)
+  }
+  if (!names.has('rcon_enabled')) {
+    database.exec(`ALTER TABLE servers ADD COLUMN rcon_enabled INTEGER NOT NULL DEFAULT 1`)
+  }
+  if (!names.has('oxide_enabled')) {
+    database.exec(`ALTER TABLE servers ADD COLUMN oxide_enabled INTEGER NOT NULL DEFAULT 0`)
+  }
+  if (!names.has('companion_enabled')) {
+    database.exec(`ALTER TABLE servers ADD COLUMN companion_enabled INTEGER NOT NULL DEFAULT 1`)
+  }
+  if (!names.has('memory_limit_mb')) {
+    database.exec(`ALTER TABLE servers ADD COLUMN memory_limit_mb INTEGER`)
+  }
 }
 
 let db: Database.Database | null = null
@@ -138,15 +177,21 @@ export function insertServer(
     game_port: number
     rcon_port: number
     rcon_password: string
+    rcon_enabled: number
     map_seed: number
     map_worldsize: number
+    max_players: number
+    server_description: string
+    oxide_enabled: number
+    companion_enabled: number
+    memory_limit_mb: number | null
     status?: ServerStatus
   }
 ): GameServerRow {
   const status = row.status ?? 'stopped'
   const insert = database.prepare(
-    `INSERT INTO servers (name, host, game_port, rcon_port, rcon_password, map_seed, map_worldsize, status)
-     VALUES (@name, @host, @game_port, @rcon_port, @rcon_password, @map_seed, @map_worldsize, @status)`
+    `INSERT INTO servers (name, host, game_port, rcon_port, rcon_password, rcon_enabled, oxide_enabled, companion_enabled, memory_limit_mb, map_seed, map_worldsize, max_players, server_description, status)
+     VALUES (@name, @host, @game_port, @rcon_port, @rcon_password, @rcon_enabled, @oxide_enabled, @companion_enabled, @memory_limit_mb, @map_seed, @map_worldsize, @max_players, @server_description, @status)`
   )
   let newId = 0
   const tx = database.transaction(() => {
@@ -156,8 +201,14 @@ export function insertServer(
       game_port: row.game_port,
       rcon_port: row.rcon_port,
       rcon_password: row.rcon_password,
+      rcon_enabled: row.rcon_enabled,
+      oxide_enabled: row.oxide_enabled,
+      companion_enabled: row.companion_enabled,
+      memory_limit_mb: row.memory_limit_mb ?? null,
       map_seed: row.map_seed,
       map_worldsize: row.map_worldsize,
+      max_players: row.max_players,
+      server_description: row.server_description,
       status,
     })
     newId = Number(info.lastInsertRowid)
@@ -181,8 +232,14 @@ export function updateServer(
       | 'game_port'
       | 'rcon_port'
       | 'rcon_password'
+      | 'rcon_enabled'
+      | 'oxide_enabled'
+      | 'companion_enabled'
+      | 'memory_limit_mb'
       | 'map_seed'
       | 'map_worldsize'
+      | 'max_players'
+      | 'server_description'
       | 'status'
     >
   >
@@ -195,15 +252,24 @@ export function updateServer(
     game_port: row.game_port ?? existing.game_port,
     rcon_port: row.rcon_port ?? existing.rcon_port,
     rcon_password: row.rcon_password ?? existing.rcon_password,
+    rcon_enabled: row.rcon_enabled ?? existing.rcon_enabled,
+    oxide_enabled: row.oxide_enabled ?? existing.oxide_enabled,
+    companion_enabled: row.companion_enabled ?? existing.companion_enabled,
+    memory_limit_mb: row.memory_limit_mb !== undefined ? row.memory_limit_mb : existing.memory_limit_mb,
     map_seed: row.map_seed ?? existing.map_seed,
     map_worldsize: row.map_worldsize ?? existing.map_worldsize,
+    max_players: row.max_players ?? existing.max_players,
+    server_description: row.server_description ?? existing.server_description,
     status: row.status ?? existing.status,
   }
   database
     .prepare(
       `UPDATE servers SET name = @name, host = @host, game_port = @game_port,
-       rcon_port = @rcon_port, rcon_password = @rcon_password, map_seed = @map_seed,
-       map_worldsize = @map_worldsize, status = @status WHERE id = @id`
+       rcon_port = @rcon_port, rcon_password = @rcon_password, rcon_enabled = @rcon_enabled, oxide_enabled = @oxide_enabled,
+       companion_enabled = @companion_enabled,
+       memory_limit_mb = @memory_limit_mb,
+       map_seed = @map_seed, map_worldsize = @map_worldsize, max_players = @max_players,
+       server_description = @server_description, status = @status WHERE id = @id`
     )
     .run({ ...next, id })
   return getServer(database, id)

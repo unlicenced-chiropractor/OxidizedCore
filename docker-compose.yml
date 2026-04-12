@@ -1,5 +1,7 @@
 # Dockge / homelab: set env in the UI or an `.env` file next to this compose file.
 # Published port defaults to 3001 → container 3001 (avoids clashes with Steam CEF on 8080).
+# Rust: OXIDIZED_RUST_PORTS_RANGE (default 28000-28700) maps UDP+TCP for dynamic game/RCON/query ports.
+# Linux + arbitrary ports: docker compose -f docker-compose.yml -f docker-compose.host.yml up -d
 #
 # This file builds from the Git repo (needs Dockerfile + source beside this compose).
 # To deploy WITHOUT source: build & push the image once, then on the server use the same
@@ -17,15 +19,13 @@ services:
     container_name: oxidized-core
     ports:
       - "${OXIDIZED_PORT:-3001}:3001"
-      # Rust: game + query are UDP; RCON (web) is TCP. Defaults match the panel (game 28015, RCON 28016).
-      # OxidizedCore sets query UDP to 28017 when RCON is 28016 (avoids default query=28016 clash).
-      # Change these if you use different ports in the UI; Windows Firewall must allow the same UDP/TCP.
-      - "28015:28015/udp"
-      - "28015:28015/tcp"
-      - "28017:28017/udp"
-      - "28016:28016/tcp"
-      # Rust+ companion (TCP) — default max(game+67, rcon+67) = 28083 for 28015/28016; change with your ports
-      - "28083:28083/tcp"
+      # Rust uses whatever ports you set in the UI (game UDP+TCP, query UDP, RCON TCP, Rust+ TCP).
+      # Bridge networking cannot "auto-open" new ports — publish one host↔container range so arbitrary
+      # ports inside the range work without editing Compose. Companion TCP is max(game,rcon)+67; keep
+      # headroom at the top of the range. Widen if you use high ports (e.g. 40000-40100:40000-40100).
+      # On Linux, prefer docker-compose.host.yml (host networking) instead of a huge range.
+      - "${OXIDIZED_RUST_PORTS_RANGE:-28000-28700}:${OXIDIZED_RUST_PORTS_RANGE:-28000-28700}/udp"
+      - "${OXIDIZED_RUST_PORTS_RANGE:-28000-28700}:${OXIDIZED_RUST_PORTS_RANGE:-28000-28700}/tcp"
     environment:
       NODE_ENV: production
       PORT: "3001"

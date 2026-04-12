@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# Omit docker/dockerfile:1 syntax image so BuildKit does not pull it from Docker Hub first.
 
 # Windows lockfiles only record win32 optional natives; `npm ci` in Linux skips linux-* packages (npm#4828).
 # Install Linux x64 gnu bindings explicitly so Vite + Tailwind v4 can load in the builder.

@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import AdmZip from 'adm-zip'
+import { isWindowsHost } from './hostPlatform.js'
 import { coreLog, coreWarn } from './log.js'
 import { getInstancesRoot } from './instancePaths.js'
 
@@ -8,7 +10,12 @@ import { getInstancesRoot } from './instancePaths.js'
 export const STEAMCMD_LINUX_TARBALL_URL =
   'https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz'
 
+/** Valve CDN — Windows SteamCMD (zip). */
+export const STEAMCMD_WINDOWS_ZIP_URL =
+  'https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip'
+
 let bootstrapInFlight: Promise<string> | null = null
+let bootstrapWindowsInFlight: Promise<string> | null = null
 
 function steamCmdPresent(dir: string): boolean {
   try {
@@ -95,6 +102,50 @@ async function downloadSteamCmdTarball(destArchive: string): Promise<void> {
   coreLog('steamcmd', 'SteamCMD archive saved', { bytes: buf.length, destArchive })
 }
 
+async function downloadSteamCmdWindowsZip(destArchive: string): Promise<void> {
+  coreLog('steamcmd', 'Fetching SteamCMD (Windows zip)…')
+  const res = await fetch(STEAMCMD_WINDOWS_ZIP_URL, {
+    redirect: 'follow',
+    headers: { 'User-Agent': 'OxidizedCore/steamcmd-bootstrap' },
+  })
+  if (!res.ok) {
+    throw new Error(`SteamCMD (Windows) download failed: HTTP ${res.status} ${res.statusText}`)
+  }
+  const buf = Buffer.from(await res.arrayBuffer())
+  fs.writeFileSync(destArchive, buf)
+  coreLog('steamcmd', 'SteamCMD Windows zip saved', { bytes: buf.length, destArchive })
+}
+
+async function downloadAndExtractSteamCmdWindows(): Promise<string> {
+  const root = getSteamCmdInstallRoot()
+  fs.mkdirSync(root, { recursive: true })
+  const exePath = path.join(root, 'steamcmd.exe')
+  if (fs.existsSync(exePath)) {
+    coreLog('steamcmd', 'Using cached steamcmd.exe', { exePath })
+    return exePath
+  }
+
+  const zipPath = path.join(root, 'steamcmd_windows.zip')
+  await downloadSteamCmdWindowsZip(zipPath)
+  coreLog('steamcmd', 'Extracting SteamCMD zip…', { root })
+  try {
+    const zip = new AdmZip(zipPath)
+    zip.extractAllTo(root, true)
+  } finally {
+    try {
+      fs.unlinkSync(zipPath)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (!fs.existsSync(exePath)) {
+    throw new Error(`SteamCMD zip extracted but steamcmd.exe not found under ${root}`)
+  }
+  coreLog('steamcmd', 'SteamCMD Windows bootstrap complete', { exePath })
+  return exePath
+}
+
 async function downloadAndExtractSteamCmd(): Promise<string> {
   const root = getSteamCmdInstallRoot()
   fs.mkdirSync(root, { recursive: true })
@@ -139,6 +190,31 @@ async function downloadAndExtractSteamCmd(): Promise<string> {
  */
 export async function ensureSteamCmdScript(): Promise<string> {
   const envPath = process.env.STEAMCMD_SCRIPT?.trim()
+
+  if (isWindowsHost()) {
+    if (envPath && fs.existsSync(envPath)) {
+      coreLog('steamcmd', 'Using STEAMCMD_SCRIPT (Windows)', { path: path.resolve(envPath) })
+      return path.resolve(envPath)
+    }
+    const localExe = path.join(getSteamCmdInstallRoot(), 'steamcmd.exe')
+    if (fs.existsSync(localExe)) {
+      coreLog('steamcmd', 'Using cached steamcmd.exe', { path: localExe })
+      return localExe
+    }
+    if (!bootstrapWindowsInFlight) {
+      coreLog('steamcmd', 'SteamCMD not on disk; downloading latest Windows zip', {
+        url: STEAMCMD_WINDOWS_ZIP_URL,
+        extractTo: getSteamCmdInstallRoot(),
+      })
+      bootstrapWindowsInFlight = downloadAndExtractSteamCmdWindows().finally(() => {
+        bootstrapWindowsInFlight = null
+      })
+    } else {
+      coreLog('steamcmd', 'Waiting for in-flight Windows SteamCMD bootstrap')
+    }
+    return bootstrapWindowsInFlight
+  }
+
   if (envPath && fs.existsSync(envPath)) {
     coreLog('steamcmd', 'Using STEAMCMD_SCRIPT from environment', { path: path.resolve(envPath) })
     return path.resolve(envPath)

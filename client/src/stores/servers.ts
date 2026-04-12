@@ -14,9 +14,22 @@ function appendCap(existing: string, chunk: string): string {
   return next.slice(next.length - MAX_LOG_CHARS)
 }
 
+function normalizeRustSnapshot(r: RustInstallSnapshot): RustInstallSnapshot {
+  const hp = r.hostPlatform ?? 'linux'
+  const label =
+    r.hostPlatformLabel ??
+    (hp === 'win32' ? 'Windows' : hp === 'darwin' ? 'macOS' : 'Linux')
+  const steam = r.rustSteamPlatform ?? (hp === 'win32' ? 'windows' : 'linux')
+  const oxide =
+    r.oxideAsset ?? (steam === 'windows' ? 'Oxide.Rust.zip' : 'Oxide.Rust-linux.zip')
+  return { ...r, hostPlatform: hp, hostPlatformLabel: label, rustSteamPlatform: steam, oxideAsset: oxide }
+}
+
 export const useServersStore = defineStore('servers', () => {
   const servers = ref<GameServer[]>([])
   const rustInstall = ref<RustInstallSnapshot | null>(null)
+  /** Oxide.Core.dll present in shared Rust DS install (from GET /api/system). */
+  const oxideInstalled = ref(false)
   const loading = ref(false)
   const error = ref<string | null>(null)
 
@@ -73,10 +86,19 @@ export const useServersStore = defineStore('servers', () => {
           s.companion_tcp_port ?? fallbackCompanionTcpPort(s.game_port, s.rcon_port),
         map_seed: s.map_seed ?? 1,
         map_worldsize: s.map_worldsize ?? 3500,
+        max_players: s.max_players ?? 100,
+        server_description: s.server_description ?? '',
+        rcon_enabled: typeof s.rcon_enabled === 'boolean' ? s.rcon_enabled : true,
+        oxide_enabled: typeof s.oxide_enabled === 'boolean' ? s.oxide_enabled : false,
+        companion_enabled: typeof s.companion_enabled === 'boolean' ? s.companion_enabled : true,
+        memory_limit_mb:
+          typeof s.memory_limit_mb === 'number' && Number.isFinite(s.memory_limit_mb)
+            ? s.memory_limit_mb
+            : null,
       }))
     })
     socket.on('system:rust', (payload: RustInstallSnapshot) => {
-      rustInstall.value = payload
+      rustInstall.value = normalizeRustSnapshot(payload)
     })
     socket.on('server:log', (payload: { serverId: number; stream: string; text: string }) => {
       const id = Number(payload?.serverId)
@@ -96,8 +118,9 @@ export const useServersStore = defineStore('servers', () => {
     try {
       const res = await fetch('/api/system')
       if (!res.ok) return
-      const data = (await res.json()) as { rust: RustInstallSnapshot }
-      rustInstall.value = data.rust
+      const data = (await res.json()) as { rust: RustInstallSnapshot; oxideInstalled?: boolean }
+      rustInstall.value = normalizeRustSnapshot(data.rust)
+      oxideInstalled.value = typeof data.oxideInstalled === 'boolean' ? data.oxideInstalled : false
     } catch {
       /* ignore */
     }
@@ -117,6 +140,15 @@ export const useServersStore = defineStore('servers', () => {
           s.companion_tcp_port ?? fallbackCompanionTcpPort(s.game_port, s.rcon_port),
         map_seed: s.map_seed ?? 1,
         map_worldsize: s.map_worldsize ?? 3500,
+        max_players: s.max_players ?? 100,
+        server_description: s.server_description ?? '',
+        rcon_enabled: typeof s.rcon_enabled === 'boolean' ? s.rcon_enabled : true,
+        oxide_enabled: typeof s.oxide_enabled === 'boolean' ? s.oxide_enabled : false,
+        companion_enabled: typeof s.companion_enabled === 'boolean' ? s.companion_enabled : true,
+        memory_limit_mb:
+          typeof s.memory_limit_mb === 'number' && Number.isFinite(s.memory_limit_mb)
+            ? s.memory_limit_mb
+            : null,
       }))
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to load servers'
@@ -144,11 +176,19 @@ export const useServersStore = defineStore('servers', () => {
 
   async function createServer(body: {
     name: string
+    /** RCON host for this panel (defaults server-side when omitted). */
+    host?: string
     game_port: number
     rcon_port: number
     rcon_password: string
+    rcon_enabled?: boolean
     map_seed: number
     map_worldsize: number
+    max_players?: number
+    server_description?: string
+    oxide_enabled?: boolean
+    companion_enabled?: boolean
+    memory_limit_mb?: number | null
   }) {
     const res = await fetch('/api/servers', {
       method: 'POST',
@@ -167,8 +207,14 @@ export const useServersStore = defineStore('servers', () => {
       game_port: number
       rcon_port: number
       rcon_password: string
+      rcon_enabled: boolean
       map_seed: number
       map_worldsize: number
+      max_players: number
+      server_description: string
+      oxide_enabled?: boolean
+      companion_enabled?: boolean
+      memory_limit_mb?: number | null
     }>
   ) {
     const res = await fetch(`/api/servers/${id}`, {
@@ -201,9 +247,15 @@ export const useServersStore = defineStore('servers', () => {
     await fetchServers()
   }
 
+  async function restartServer(id: number) {
+    await stopServer(id)
+    await startServer(id)
+  }
+
   return {
     servers,
     rustInstall,
+    oxideInstalled,
     loading,
     error,
     steamInstallLog,
@@ -222,5 +274,6 @@ export const useServersStore = defineStore('servers', () => {
     removeServer,
     startServer,
     stopServer,
+    restartServer,
   }
 })

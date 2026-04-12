@@ -1,0 +1,11 @@
+# Linux: use host networking so Rust can bind any game/RCON/query/companion ports from the UI
+# without listing them in Compose. The web UI still uses PORT (default 3001) on the host.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.host.yml up -d --build
+#
+# Docker Desktop on Windows/macOS often does not support true host networking; use the default
+# compose file with a wide OXIDIZED_RUST_PORTS_RANGE in .env instead.
+
+services:
+  oxidized-core:
+    network_mode: host

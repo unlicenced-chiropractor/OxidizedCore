@@ -7,6 +7,7 @@ Web dashboard for running **Rust** dedicated servers from a single container: cr
 ## Requirements
 
 - **Docker** and **Docker Compose** (recommended), or Node.js **20+** for local development
+- On **Windows** (or Linux) without Docker, the app auto-downloads **SteamCMD** and the correct **Rust dedicated** and **Oxide** builds for the host OS
 - Enough disk space for the Rust dedicated server (~15 GB+ under the data volume)
 - Open **firewall / router** ports for game **UDP**, query **UDP**, **RCON TCP**, and optional **Rust+ TCP** (see [Ports](#ports))
 
@@ -25,6 +26,10 @@ Open **http://localhost:3001** (or `http://<host>:3001`).
 
 On Windows you can use `build.bat` to build the image, then `docker compose up -d`.
 
+**Dynamic Rust ports in Docker:** the engine only forwards ports listed in Compose. By default, **UDP+TCP `28000-28700`** are published in both directions so typical UI ports (and Rust+ companion at `max(game,rcon)+67`) work without editing the file. Set **`OXIDIZED_RUST_PORTS_RANGE`** in `.env` to widen (e.g. `27000-29000`). For **any** port on **Linux**, use host networking:
+
+`docker compose -f docker-compose.yml -f docker-compose.host.yml up -d --build`
+
 ### Data layout (volume `oxidized-core-data` → `/data`)
 
 | Path | Purpose |
@@ -41,6 +46,7 @@ Compose reads variables from a `.env` file next to `docker-compose.yml`. Common 
 | Variable | Default | Notes |
 |----------|---------|--------|
 | `OXIDIZED_PORT` | `3001` | Published web UI port |
+| `OXIDIZED_RUST_PORTS_RANGE` | `28000-28700` | Host↔container UDP+TCP range for game, query, RCON, Rust+ (bridge mode) |
 | `TRUST_PROXY` | `0` | Set `1` behind nginx/Traefik/Caddy |
 | `CORS_ORIGIN` | — | Comma-separated origins if you lock CORS |
 
@@ -48,17 +54,17 @@ See comments in [`docker-compose.yml`](docker-compose.yml) and [`server/.env.exa
 
 ## Ports
 
-Default in-game ports match a new server in the UI (**game 28015**, **RCON 28016**). The app sets **query UDP** to **28017** so it does not collide with RCON.
+Default in-game ports match a new server in the UI (**game 28015**, **RCON 28016**). The app sets **query UDP** to **game+1** (or **game+2** if that would equal RCON). **Rust+ TCP** is `max(game+67, rcon+67)`.
 
 | Port | Protocol | Role |
 |------|----------|------|
 | 3001 | TCP | Web UI |
-| 28015 | UDP (+ TCP mapped) | Rust game |
-| 28017 | UDP | Steam query |
-| 28016 | TCP | RCON (web) |
-| 28083 | TCP | Rust+ companion (default for 28015/28016) |
+| (your game port) | UDP + TCP | Rust game |
+| (query) | UDP | Steam query |
+| (RCON) | TCP | Web / RCON clients |
+| (companion) | TCP | Rust+ mobile |
 
-If you add **multiple servers** with different ports, extend the `ports:` section in Compose to match.
+**Docker (bridge):** Compose publishes **`OXIDIZED_RUST_PORTS_RANGE`** (default **28000–28700**) for both UDP and TCP so new servers in that band are reachable from the internet/LAN. Pick ports inside the range, or widen the env var, or use **`docker-compose.host.yml`** on Linux so the container shares the host network and any port works.
 
 ## Local development
 
@@ -86,6 +92,7 @@ Serve the built UI from the server with `SERVE_STATIC=1` (typical in Docker).
 client/          # Vue 3 SPA
 server/          # Express API, supervisor, Steam/Rust integration
 docker-compose.yml
+docker-compose.host.yml   # Linux: host network for arbitrary Rust ports
 Dockerfile
 build.bat        # Windows: docker build -t oxidized-core:local .
 ```

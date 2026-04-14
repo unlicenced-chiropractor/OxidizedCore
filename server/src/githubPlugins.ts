@@ -1,10 +1,12 @@
 /**
  * GitHub Search API — discover public repos tagged as Rust/Oxide/uMod plugins (C#).
- * Optional OXIDIZED_GITHUB_TOKEN (or GITHUB_TOKEN) raises rate limits (5000/hr vs ~60/hr unauthenticated).
+ * Token: `resolveGithubToken()` (env OXIDIZED_GITHUB_TOKEN / GITHUB_TOKEN, else Settings DB).
  *
  * Note: GitHub does not support OR between topic qualifiers (e.g. topic:a OR topic:b returns 0).
  * Default mode runs several valid searches and merges results.
  */
+
+import { resolveGithubToken } from './appSettings.js'
 
 const SEARCH_URL = 'https://api.github.com/search/repositories'
 
@@ -44,10 +46,19 @@ type GitHubSearchResponse = {
 }
 
 function authHeaders(): Record<string, string> {
-  const token = process.env.OXIDIZED_GITHUB_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim()
+  const token = resolveGithubToken()
   if (!token) return {}
   if (token.startsWith('github_pat_')) return { Authorization: `Bearer ${token}` }
   return { Authorization: `token ${token}` }
+}
+
+/** Shared headers for GitHub REST (search, zipball, repo meta). */
+export function githubApiHeaders(): Record<string, string> {
+  return {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'OxidizedCore/1.0',
+    ...authHeaders(),
+  }
 }
 
 export type GithubSearchResult =
@@ -95,11 +106,7 @@ async function githubSearchRequest(
   url.searchParams.set('per_page', String(perPage))
 
   const res = await fetch(url.toString(), {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'OxidizedCore/1.0',
-      ...authHeaders(),
-    },
+    headers: githubApiHeaders(),
   })
 
   const rateRemaining = res.headers.get('x-ratelimit-remaining')
@@ -154,11 +161,29 @@ function sortRepos(list: GithubOxideRepo[], sort: 'stars' | 'updated' | 'best-ma
   })
 }
 
+function buildMergedSubQuery(base: string, keywords: string | undefined): string {
+  const k = keywords?.trim().replace(/\s+/g, ' ') ?? ''
+  if (!k) return base
+  const combined = `${base} ${k}`
+  return combined.length > 256 ? combined.slice(0, 256) : combined
+}
+
+/** True when the user likely intends a full GitHub search string (not plain keywords). */
+function looksLikeGithubAdvancedQuery(s: string): boolean {
+  const t = s.trim()
+  if (!t) return false
+  if (t.includes(':')) return true
+  if (/\bOR\b/i.test(t) || /\bAND\b/i.test(t)) return true
+  return false
+}
+
 /** Default: merge several topic searches (GitHub disallows OR across topic qualifiers). */
 async function searchDefaultMerged(opts: {
   page: number
   sort: 'stars' | 'updated' | 'best-match'
   order: 'asc' | 'desc'
+  /** AND’d onto each topic sub-query (plain words); omit for full catalog. */
+  keywords?: string
 }): Promise<GithubSearchResult> {
   const perPageFetch = 100
   const merged = new Map<string, GithubOxideRepo>()
@@ -168,7 +193,8 @@ async function searchDefaultMerged(opts: {
   const sort = opts.sort === 'updated' || opts.sort === 'best-match' ? opts.sort : 'stars'
   const order = opts.order === 'asc' ? 'asc' : 'desc'
 
-  for (const subQ of DEFAULT_SUB_QUERIES) {
+  for (const base of DEFAULT_SUB_QUERIES) {
+    const subQ = buildMergedSubQuery(base, opts.keywords)
     let ghPage = 1
     while (ghPage <= 10) {
       const r = await githubSearchRequest(subQ, ghPage, sort, order, perPageFetch)
@@ -247,16 +273,28 @@ export async function searchOxideRelatedRepos(opts: {
   page: number
   sort: 'stars' | 'updated' | 'best-match'
   order: 'asc' | 'desc'
-  /** If set, one GitHub search only (you must use valid GitHub search syntax). */
+  /**
+   * Plain words: merged topic searches with keywords AND’d in.
+   * If this looks like GitHub syntax (e.g. contains `:`), one native search is used instead.
+   */
   query?: string
 }): Promise<GithubSearchResult> {
   try {
-    if (opts.query?.trim()) {
-      return await searchSingleQuery({
+    const raw = opts.query?.trim().slice(0, 256) ?? ''
+    if (raw) {
+      if (looksLikeGithubAdvancedQuery(raw)) {
+        return await searchSingleQuery({
+          page: opts.page,
+          sort: opts.sort,
+          order: opts.order,
+          query: raw,
+        })
+      }
+      return await searchDefaultMerged({
         page: opts.page,
         sort: opts.sort,
         order: opts.order,
-        query: opts.query.trim(),
+        keywords: raw,
       })
     }
     return await searchDefaultMerged({

@@ -1,53 +1,18 @@
-# Dockge / homelab: set env in the UI or an `.env` file next to this compose file.
-# Published port defaults to 3001 → container 3001 (avoids clashes with Steam CEF on 8080).
-# Rust: OXIDIZED_RUST_PORTS_RANGE (default 28000-28700) maps UDP+TCP for dynamic game/RCON/query ports.
-# Linux + arbitrary ports: docker compose -f docker-compose.yml -f docker-compose.host.yml up -d
-#
-# This file builds from the Git repo (needs Dockerfile + source beside this compose).
-# To deploy WITHOUT source: build & push the image once, then on the server use the same
-# service block but replace `build: .` and `pull_policy: build` with only:
-#   image: your-registry/oxidized-core:1.0.0
-# (Docker will pull that image; copy ports/env/volumes as below.)
-
 services:
   oxidized-core:
-    build: .
-    # Local tag only; avoids Compose trying to pull from a registry.
-    image: oxidized-core:local
-    # Build from Dockerfile instead of inspecting/pulling a remote image (helps when the engine misbehaves on image JSON).
-    pull_policy: build
+    image: sortedsheep/oxidized-core:latest
     container_name: oxidized-core
-    ports:
-      - "${OXIDIZED_PORT:-3001}:3001"
-      # Rust uses whatever ports you set in the UI (game UDP+TCP, query UDP, RCON TCP, Rust+ TCP).
-      # Bridge networking cannot "auto-open" new ports — publish one host↔container range so arbitrary
-      # ports inside the range work without editing Compose. Companion TCP is max(game,rcon)+67; keep
-      # headroom at the top of the range. Widen if you use high ports (e.g. 40000-40100:40000-40100).
-      # On Linux, prefer docker-compose.host.yml (host networking) instead of a huge range.
-      - "${OXIDIZED_RUST_PORTS_RANGE:-28000-28700}:${OXIDIZED_RUST_PORTS_RANGE:-28000-28700}/udp"
-      - "${OXIDIZED_RUST_PORTS_RANGE:-28000-28700}:${OXIDIZED_RUST_PORTS_RANGE:-28000-28700}/tcp"
-    environment:
-      NODE_ENV: production
-      PORT: "3001"
-      HOST: "0.0.0.0"
-      # One volume: DB, instances/<slug>/ per server, instances/_shared/ for Steam Rust + optional SteamCMD cache
-      SQLITE_PATH: /data/oxidized.db
-      # Default install dir is /data/instances/_shared/rust-dedicated (override if you use a host path)
-      # RUST_DS_INSTALL_DIR: /data/instances/_shared/rust-dedicated
-      # Optional; image preinstalls under /opt. If missing, app may download SteamCMD to instances/_shared/steamcmd.
-      # STEAMCMD_SCRIPT: /opt/steamcmd/steamcmd.sh
-      # OXIDIZED_STEAMCMD_DIR: /data/instances/_shared/steamcmd
-      # Dev / CI only: skip Steam and use a mock process
-      # OXIDIZED_SKIP_STEAM_INSTALL: "1"
-      # Override auto-detected binary (optional)
-      # OXIDIZED_RUSTDEDICATED_BIN: /custom/RustDedicated
-      # Behind NPM, Traefik, Caddy, etc. set to 1 so Express respects X-Forwarded-* headers
-      TRUST_PROXY: "${TRUST_PROXY:-0}"
-      # Optional: lock CORS/Socket.IO to your public URL(s), comma-separated
-      # CORS_ORIGIN: "https://oxidized.example.com"
-    volumes:
-      - oxidized-core-data:/data
     restart: unless-stopped
 
-volumes:
-  oxidized-core-data:
+    ports:
+      - "${OXIDIZED_PORT:-3001}:3001"
+
+    environment:
+      NODE_ENV: production
+      HOST: "0.0.0.0"
+      PORT: "3001"
+      SQLITE_PATH: /data/oxidized.db
+      TRUST_PROXY: "${TRUST_PROXY:-0}"
+
+    volumes:
+      - ./oxidized-core-data:/data

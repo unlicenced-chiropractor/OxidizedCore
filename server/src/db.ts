@@ -21,6 +21,8 @@ export type GameServerRow = {
   oxide_enabled: number
   /** 0 or 1 — Rust+ companion TCP (+app.port); off uses +app.port 1- */
   companion_enabled: number
+  /** 0 or 1 — EAC enabled/disabled (+server.secure). */
+  eac_enabled: number
   /** Optional RAM cap for the game process (MiB); null = unlimited. */
   memory_limit_mb: number | null
   /** Procedural map (+server.seed). */
@@ -39,11 +41,12 @@ export type GameServerRow = {
 
 export type GameServerPublic = Omit<
   GameServerRow,
-  'rcon_password' | 'rcon_enabled' | 'oxide_enabled' | 'companion_enabled'
+  'rcon_password' | 'rcon_enabled' | 'oxide_enabled' | 'companion_enabled' | 'eac_enabled'
 > & {
   rcon_enabled: boolean
   oxide_enabled: boolean
   companion_enabled: boolean
+  eac_enabled: boolean
   /** UDP — Steam query / server list (same rules as +server.queryport). */
   query_port: number
   /** TCP — Rust+ companion (forward for mobile app; not required for F1 connect). */
@@ -51,12 +54,13 @@ export type GameServerPublic = Omit<
 }
 
 export function toPublic(row: GameServerRow): GameServerPublic {
-  const { rcon_password: _p, rcon_enabled, oxide_enabled, companion_enabled, ...rest } = row
+  const { rcon_password: _p, rcon_enabled, oxide_enabled, companion_enabled, eac_enabled, ...rest } = row
   return {
     ...rest,
     rcon_enabled: rcon_enabled !== 0,
     oxide_enabled: oxide_enabled !== 0,
     companion_enabled: companion_enabled !== 0,
+    eac_enabled: eac_enabled !== 0,
     query_port: effectiveQueryPort(row.game_port, row.rcon_port),
     companion_tcp_port: rustCompanionTcpPort(row.game_port, row.rcon_port),
   }
@@ -142,6 +146,9 @@ function migrateServersTable(database: Database.Database) {
   if (!names.has('companion_enabled')) {
     database.exec(`ALTER TABLE servers ADD COLUMN companion_enabled INTEGER NOT NULL DEFAULT 1`)
   }
+  if (!names.has('eac_enabled')) {
+    database.exec(`ALTER TABLE servers ADD COLUMN eac_enabled INTEGER NOT NULL DEFAULT 1`)
+  }
   if (!names.has('memory_limit_mb')) {
     database.exec(`ALTER TABLE servers ADD COLUMN memory_limit_mb INTEGER`)
   }
@@ -184,14 +191,15 @@ export function insertServer(
     server_description: string
     oxide_enabled: number
     companion_enabled: number
+    eac_enabled: number
     memory_limit_mb: number | null
     status?: ServerStatus
   }
 ): GameServerRow {
   const status = row.status ?? 'stopped'
   const insert = database.prepare(
-    `INSERT INTO servers (name, host, game_port, rcon_port, rcon_password, rcon_enabled, oxide_enabled, companion_enabled, memory_limit_mb, map_seed, map_worldsize, max_players, server_description, status)
-     VALUES (@name, @host, @game_port, @rcon_port, @rcon_password, @rcon_enabled, @oxide_enabled, @companion_enabled, @memory_limit_mb, @map_seed, @map_worldsize, @max_players, @server_description, @status)`
+    `INSERT INTO servers (name, host, game_port, rcon_port, rcon_password, rcon_enabled, oxide_enabled, companion_enabled, eac_enabled, memory_limit_mb, map_seed, map_worldsize, max_players, server_description, status)
+     VALUES (@name, @host, @game_port, @rcon_port, @rcon_password, @rcon_enabled, @oxide_enabled, @companion_enabled, @eac_enabled, @memory_limit_mb, @map_seed, @map_worldsize, @max_players, @server_description, @status)`
   )
   let newId = 0
   const tx = database.transaction(() => {
@@ -204,6 +212,7 @@ export function insertServer(
       rcon_enabled: row.rcon_enabled,
       oxide_enabled: row.oxide_enabled,
       companion_enabled: row.companion_enabled,
+      eac_enabled: row.eac_enabled,
       memory_limit_mb: row.memory_limit_mb ?? null,
       map_seed: row.map_seed,
       map_worldsize: row.map_worldsize,
@@ -235,6 +244,7 @@ export function updateServer(
       | 'rcon_enabled'
       | 'oxide_enabled'
       | 'companion_enabled'
+      | 'eac_enabled'
       | 'memory_limit_mb'
       | 'map_seed'
       | 'map_worldsize'
@@ -255,6 +265,7 @@ export function updateServer(
     rcon_enabled: row.rcon_enabled ?? existing.rcon_enabled,
     oxide_enabled: row.oxide_enabled ?? existing.oxide_enabled,
     companion_enabled: row.companion_enabled ?? existing.companion_enabled,
+    eac_enabled: row.eac_enabled ?? existing.eac_enabled,
     memory_limit_mb: row.memory_limit_mb !== undefined ? row.memory_limit_mb : existing.memory_limit_mb,
     map_seed: row.map_seed ?? existing.map_seed,
     map_worldsize: row.map_worldsize ?? existing.map_worldsize,
@@ -266,7 +277,7 @@ export function updateServer(
     .prepare(
       `UPDATE servers SET name = @name, host = @host, game_port = @game_port,
        rcon_port = @rcon_port, rcon_password = @rcon_password, rcon_enabled = @rcon_enabled, oxide_enabled = @oxide_enabled,
-       companion_enabled = @companion_enabled,
+       companion_enabled = @companion_enabled, eac_enabled = @eac_enabled,
        memory_limit_mb = @memory_limit_mb,
        map_seed = @map_seed, map_worldsize = @map_worldsize, max_players = @max_players,
        server_description = @server_description, status = @status WHERE id = @id`

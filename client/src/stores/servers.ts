@@ -91,6 +91,7 @@ export const useServersStore = defineStore('servers', () => {
         rcon_enabled: typeof s.rcon_enabled === 'boolean' ? s.rcon_enabled : true,
         oxide_enabled: typeof s.oxide_enabled === 'boolean' ? s.oxide_enabled : false,
         companion_enabled: typeof s.companion_enabled === 'boolean' ? s.companion_enabled : true,
+        eac_enabled: typeof s.eac_enabled === 'boolean' ? s.eac_enabled : true,
         memory_limit_mb:
           typeof s.memory_limit_mb === 'number' && Number.isFinite(s.memory_limit_mb)
             ? s.memory_limit_mb
@@ -145,6 +146,7 @@ export const useServersStore = defineStore('servers', () => {
         rcon_enabled: typeof s.rcon_enabled === 'boolean' ? s.rcon_enabled : true,
         oxide_enabled: typeof s.oxide_enabled === 'boolean' ? s.oxide_enabled : false,
         companion_enabled: typeof s.companion_enabled === 'boolean' ? s.companion_enabled : true,
+        eac_enabled: typeof s.eac_enabled === 'boolean' ? s.eac_enabled : true,
         memory_limit_mb:
           typeof s.memory_limit_mb === 'number' && Number.isFinite(s.memory_limit_mb)
             ? s.memory_limit_mb
@@ -188,6 +190,7 @@ export const useServersStore = defineStore('servers', () => {
     server_description?: string
     oxide_enabled?: boolean
     companion_enabled?: boolean
+    eac_enabled?: boolean
     memory_limit_mb?: number | null
   }) {
     const res = await fetch('/api/servers', {
@@ -214,6 +217,7 @@ export const useServersStore = defineStore('servers', () => {
       server_description: string
       oxide_enabled?: boolean
       companion_enabled?: boolean
+      eac_enabled?: boolean
       memory_limit_mb?: number | null
     }>
   ) {

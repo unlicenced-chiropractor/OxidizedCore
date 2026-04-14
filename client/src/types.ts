@@ -26,6 +26,8 @@ export type GameServer = {
   oxide_enabled: boolean
   /** When true, dedicated server runs Rust+ companion on companion_tcp_port (+app.port). */
   companion_enabled: boolean
+  /** When true, EAC is enabled (+server.secure 1). */
+  eac_enabled: boolean
   /** UDP — query / server browser (open in firewall alongside game UDP). */
   query_port: number
   /** TCP — Rust+ companion (optional for joining via F1). */

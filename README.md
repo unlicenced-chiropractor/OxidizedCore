@@ -26,6 +26,26 @@ Open **http://localhost:3001** (or `http://<host>:3001`).
 
 On Windows you can use `build.bat` to build the image, then `docker compose up -d`.
 
+## Publish flow (GitHub + Docker Hub)
+
+From repo root on Windows:
+
+```powershell
+npm run deploy:github-dockerhub
+```
+
+The script asks exactly two prompts:
+- target git branch
+- commit message
+
+Then it will:
+- checkout/create that branch
+- stage and commit changes (if there are staged diffs)
+- push branch to `origin`
+- build and push Docker image tags to Docker Hub (`sortedsheep/oxidized-core:latest` and a branch tag)
+
+Optional override (without extra prompt): set `DOCKER_IMAGE_REPO` to use a different Docker Hub repository.
+
 **Dynamic Rust ports in Docker:** the engine only forwards ports listed in Compose. By default, **UDP+TCP `28000-28700`** are published in both directions so typical UI ports (and Rust+ companion at `max(game,rcon)+67`) work without editing the file. Set **`OXIDIZED_RUST_PORTS_RANGE`** in `.env` to widen (e.g. `27000-29000`). For **any** port on **Linux**, use host networking:
 
 `docker compose -f docker-compose.yml -f docker-compose.host.yml up -d --build`

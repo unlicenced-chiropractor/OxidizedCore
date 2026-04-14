@@ -34,10 +34,30 @@ import {
   setRustInstallStateNotifier,
 } from './steamRust.js'
 import { resolveProceduralMapPreview } from './rustMapsPreview.js'
-import { getAppSettingsPublic, getRustmapsApiKey, setRustmapsApiKey } from './appSettings.js'
+import {
+  attachSettingsDatabase,
+  getAppSettingsPublic,
+  getRustmapsApiKey,
+  setGithubToken,
+  setRustmapsApiKey,
+} from './appSettings.js'
 import { detectOxidePresentOnDisk } from './oxideInstall.js'
-import { fetchUmodPluginsPage } from './umodCatalog.js'
 import { searchOxideRelatedRepos } from './githubPlugins.js'
+import {
+  deleteInstalledOxidePlugin,
+  installOxidePluginFromGithubRepo,
+  listInstalledOxidePlugins,
+} from './pluginGithubInstall.js'
+import {
+  listUsersCfgEntries,
+  normalizeSteamId64,
+  readUsersCfgFile,
+  removeUserCfgLines,
+  upsertUserCfgLine,
+  usersCfgPathForServer,
+  writeUsersCfgFile,
+  type UserCfgRole,
+} from './rustUsersCfg.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.join(__dirname, '..', '.env') })
@@ -92,6 +112,7 @@ coreLog('boot', 'Starting OxidizedCore server', {
 })
 
 const database = getDb(SQLITE_PATH)
+attachSettingsDatabase(database)
 coreLog('boot', 'SQLite database open', { SQLITE_PATH })
 initRustInstallState()
 
@@ -174,29 +195,100 @@ app.get('/api/github/oxide-plugins', async (req, res) => {
   }
 })
 
-app.get('/api/umod/plugins', async (req, res) => {
-  const page = Number(req.query.page)
-  const p = Number.isFinite(page) ? Math.min(500, Math.max(1, Math.floor(page))) : 1
-  const sortRaw = typeof req.query.sort === 'string' ? req.query.sort.trim() : 'title'
-  const sort = /^[a-z0-9_-]{1,32}$/i.test(sortRaw) ? sortRaw : 'title'
-  const sortdir = req.query.sortdir === 'desc' ? 'desc' : 'asc'
+app.get('/api/servers/:id/plugins/installed', (req, res) => {
+  if (!detectOxidePresentOnDisk()) {
+    res.status(503).json({ ok: false, error: 'Oxide is not installed in the shared Rust dedicated directory' })
+    return
+  }
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ ok: false, error: 'Invalid server id' })
+    return
+  }
+  if (!getServer(database, id)) {
+    res.status(404).json({ ok: false, error: 'Not found' })
+    return
+  }
+  const result = listInstalledOxidePlugins()
+  if (!result.ok) {
+    res.status(500).json({ ok: false, error: result.error })
+    return
+  }
+  res.json({ ok: true, plugins: result.plugins, pluginsDir: result.pluginsDir })
+})
+
+app.delete('/api/servers/:id/plugins/installed', (req, res) => {
+  if (!detectOxidePresentOnDisk()) {
+    res.status(503).json({ ok: false, error: 'Oxide is not installed in the shared Rust dedicated directory' })
+    return
+  }
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ ok: false, error: 'Invalid server id' })
+    return
+  }
+  if (!getServer(database, id)) {
+    res.status(404).json({ ok: false, error: 'Not found' })
+    return
+  }
+  const file =
+    typeof req.query.file === 'string'
+      ? req.query.file
+      : typeof req.body?.file === 'string'
+        ? req.body.file
+        : ''
+  if (!file.trim()) {
+    res.status(400).json({ ok: false, error: 'Missing file name (query ?file= or JSON body { file })' })
+    return
+  }
+  const del = deleteInstalledOxidePlugin(file)
+  if (!del.ok) {
+    res.status(del.error === 'File not found' ? 404 : 400).json({ ok: false, error: del.error })
+    return
+  }
+  res.json({ ok: true })
+})
+
+app.post('/api/servers/:id/plugins/github-install', async (req, res) => {
+  if (!detectOxidePresentOnDisk()) {
+    res.status(503).json({ ok: false, error: 'Oxide is not installed in the shared Rust dedicated directory' })
+    return
+  }
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ ok: false, error: 'Invalid server id' })
+    return
+  }
+  const server = getServer(database, id)
+  if (!server) {
+    res.status(404).json({ ok: false, error: 'Not found' })
+    return
+  }
+  const fullName = typeof req.body?.fullName === 'string' ? req.body.fullName.trim() : ''
+  if (!fullName) {
+    res.status(400).json({ ok: false, error: 'Body must include fullName (owner/repo)' })
+    return
+  }
   try {
-    const result = await fetchUmodPluginsPage({ page: p, sort, sortdir })
+    const result = await installOxidePluginFromGithubRepo(fullName)
+    if (!result.ok) {
+      const status = result.code === 'already_installed' ? 409 : 502
+      res.status(status).json({
+        ok: false,
+        error: result.error,
+        code: result.code,
+        conflicting: result.conflicting,
+      })
+      return
+    }
     res.json({
       ok: true,
-      blocked: false,
-      source: result.source,
-      note: result.note,
-      catalogUrl: result.catalogUrl,
-      page: result.page,
-      sort,
-      sortdir,
-      plugins: result.plugins,
-      hasNext: result.hasNext,
+      written: result.written,
+      pluginsDir: result.pluginsDir,
     })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    coreWarn('api', 'GET /api/umod/plugins failed', { message: msg })
+    coreWarn('api', 'POST /api/servers/:id/plugins/github-install failed', { message: msg })
     res.status(500).json({ ok: false, error: msg })
   }
 })
@@ -206,15 +298,25 @@ app.get('/api/settings', (_req, res) => {
 })
 
 app.patch('/api/settings', (req, res) => {
-  const { rustmapsApiKey } = req.body ?? {}
+  const { rustmapsApiKey, githubToken } = req.body ?? {}
   if (rustmapsApiKey !== undefined && rustmapsApiKey !== null && typeof rustmapsApiKey !== 'string') {
     res.status(400).json({ error: 'rustmapsApiKey must be a string' })
+    return
+  }
+  if (githubToken !== undefined && githubToken !== null && typeof githubToken !== 'string') {
+    res.status(400).json({ error: 'githubToken must be a string' })
     return
   }
   if (typeof rustmapsApiKey === 'string') {
     setRustmapsApiKey(database, rustmapsApiKey.length ? rustmapsApiKey : null)
   }
-  coreLog('api', 'PATCH /api/settings', { rustmapsKeyUpdated: typeof rustmapsApiKey === 'string' })
+  if (typeof githubToken === 'string') {
+    setGithubToken(database, githubToken.length ? githubToken : null)
+  }
+  coreLog('api', 'PATCH /api/settings', {
+    rustmapsKeyUpdated: typeof rustmapsApiKey === 'string',
+    githubTokenUpdated: typeof githubToken === 'string',
+  })
   res.json(getAppSettingsPublic(database))
 })
 
@@ -276,6 +378,98 @@ app.get('/api/servers/:id/logs', (req, res) => {
   res.json({ text })
 })
 
+app.get('/api/servers/:id/users-cfg', (req, res) => {
+  const id = Number(req.params.id)
+  const server = Number.isFinite(id) ? getServer(database, id) : undefined
+  if (!server) {
+    res.status(404).json({ ok: false, error: 'Not found' })
+    return
+  }
+  const filePath = usersCfgPathForServer(id)
+  const raw = readUsersCfgFile(filePath)
+  res.json({
+    ok: true,
+    entries: listUsersCfgEntries(raw),
+    filePath,
+  })
+})
+
+app.post('/api/servers/:id/users-cfg', (req, res) => {
+  const id = Number(req.params.id)
+  const server = Number.isFinite(id) ? getServer(database, id) : undefined
+  if (!server) {
+    res.status(404).json({ ok: false, error: 'Not found' })
+    return
+  }
+  const { steamId: bodySteam, role } = req.body ?? {}
+  if (typeof bodySteam !== 'string' || typeof role !== 'string') {
+    res.status(400).json({ ok: false, error: 'Body must include steamId (string) and role' })
+    return
+  }
+  const steamId = normalizeSteamId64(bodySteam)
+  if (!steamId) {
+    res.status(400).json({ ok: false, error: 'Invalid SteamID64 (15–20 digit numeric ID)' })
+    return
+  }
+  const r = role.trim().toLowerCase()
+  const userRole: UserCfgRole | null = r === 'ownerid' || r === 'owner' ? 'ownerid' : r === 'moderatorid' || r === 'moderator' ? 'moderatorid' : null
+  if (!userRole) {
+    res.status(400).json({ ok: false, error: 'role must be ownerid or moderatorid' })
+    return
+  }
+  try {
+    const filePath = usersCfgPathForServer(id)
+    const prev = readUsersCfgFile(filePath)
+    const next = upsertUserCfgLine(prev, steamId, userRole)
+    writeUsersCfgFile(filePath, next)
+    coreLog('api', 'POST /api/servers/:id/users-cfg', { serverId: id, steamId, role: userRole })
+    res.json({
+      ok: true,
+      entries: listUsersCfgEntries(next),
+      filePath,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    coreWarn('api', 'POST /api/servers/:id/users-cfg failed', { message: msg })
+    res.status(500).json({ ok: false, error: msg })
+  }
+})
+
+app.delete('/api/servers/:id/users-cfg', (req, res) => {
+  const id = Number(req.params.id)
+  const server = Number.isFinite(id) ? getServer(database, id) : undefined
+  if (!server) {
+    res.status(404).json({ ok: false, error: 'Not found' })
+    return
+  }
+  const { steamId: bodySteam } = req.body ?? {}
+  if (typeof bodySteam !== 'string') {
+    res.status(400).json({ ok: false, error: 'Body must include steamId (string)' })
+    return
+  }
+  const steamId = normalizeSteamId64(bodySteam)
+  if (!steamId) {
+    res.status(400).json({ ok: false, error: 'Invalid SteamID64' })
+    return
+  }
+  try {
+    const filePath = usersCfgPathForServer(id)
+    const prev = readUsersCfgFile(filePath)
+    const next = removeUserCfgLines(prev, steamId)
+    writeUsersCfgFile(filePath, next)
+    coreLog('api', 'DELETE /api/servers/:id/users-cfg', { serverId: id, steamId })
+    res.json({
+      ok: true,
+      entries: listUsersCfgEntries(next),
+      filePath,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    coreWarn('api', 'DELETE /api/servers/:id/users-cfg failed', { message: msg })
+    res.status(500).json({ ok: false, error: msg })
+  }
+})
+
 app.post('/api/servers', (req, res) => {
   const {
     name,
@@ -290,6 +484,7 @@ app.post('/api/servers', (req, res) => {
     rcon_enabled: bodyRconEnabled,
     oxide_enabled: bodyOxideEnabled,
     companion_enabled: bodyCompanionEnabled,
+    eac_enabled: bodyEacEnabled,
     memory_limit_mb: bodyMemoryLimitMb,
   } = req.body ?? {}
   coreLog('api', 'POST /api/servers (create)', { name, game_port, rcon_port, map_seed, map_worldsize })
@@ -307,6 +502,7 @@ app.post('/api/servers', (req, res) => {
   const rconEnabled = bodyRconEnabled === false ? false : true
   const oxideEnabled = bodyOxideEnabled === true
   const companionEnabled = bodyCompanionEnabled === false ? false : true
+  const eacEnabled = bodyEacEnabled === false ? false : true
   const maxPlayers =
     typeof bodyMaxPlayers === 'number' && Number.isInteger(bodyMaxPlayers) ? bodyMaxPlayers : 100
   const serverDescription =
@@ -357,6 +553,7 @@ app.post('/api/servers', (req, res) => {
     rcon_enabled: rconEnabled ? 1 : 0,
     oxide_enabled: oxideEnabled ? 1 : 0,
     companion_enabled: companionEnabled ? 1 : 0,
+    eac_enabled: eacEnabled ? 1 : 0,
     map_seed,
     map_worldsize,
     max_players: maxPlayers,
@@ -426,6 +623,11 @@ app.patch('/api/servers/:id', (req, res) => {
       res.status(409).json({ error: 'Stop the server before changing Rust+' })
       return
     }
+    const { eac_enabled: ea } = req.body ?? {}
+    if (typeof ea === 'boolean' && ea !== (existing.eac_enabled !== 0)) {
+      res.status(409).json({ error: 'Stop the server before changing EAC' })
+      return
+    }
     if ('memory_limit_mb' in (req.body ?? {})) {
       const raw = req.body.memory_limit_mb
       let nextMem: number | null
@@ -460,6 +662,7 @@ app.patch('/api/servers/:id', (req, res) => {
     rcon_enabled: bodyRconEnabled,
     oxide_enabled: bodyOxideEnabled,
     companion_enabled: bodyCompanionEnabled,
+    eac_enabled: bodyEacEnabled,
     memory_limit_mb: bodyMemoryLimitMb,
   } = req.body ?? {}
   const patch: Parameters<typeof updateServer>[2] = {}
@@ -506,6 +709,9 @@ app.patch('/api/servers/:id', (req, res) => {
   }
   if (typeof bodyCompanionEnabled === 'boolean') {
     patch.companion_enabled = bodyCompanionEnabled ? 1 : 0
+  }
+  if (typeof bodyEacEnabled === 'boolean') {
+    patch.eac_enabled = bodyEacEnabled ? 1 : 0
   }
   if ('memory_limit_mb' in (req.body ?? {})) {
     const raw = bodyMemoryLimitMb

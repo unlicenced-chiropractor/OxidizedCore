@@ -11,7 +11,8 @@
     "build": "npm run build -w client && npm run build -w server",
     "start": "npm run start -w server",
     "docker:build": "docker build -t oxidized-core:local .",
-    "docker:up": "docker compose up -d --build"
+    "docker:up": "docker compose up -d --build",
+    "deploy:github-dockerhub": "build-and-publish.bat"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

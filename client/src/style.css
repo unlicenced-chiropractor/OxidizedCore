@@ -2,6 +2,20 @@
 
 :root {
   color-scheme: dark;
+  /* Slightly larger than default 16px so Tailwind rem units use more of the viewport. */
+  font-size: 17px;
+}
+
+@media (min-width: 1280px) {
+  :root {
+    font-size: 18px;
+  }
+}
+
+@media (min-width: 1920px) {
+  :root {
+    font-size: 19px;
+  }
 }
 
 body {

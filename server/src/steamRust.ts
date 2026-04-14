@@ -121,6 +121,22 @@ export function isRustDedicatedBinaryPresent(): boolean {
   }
 }
 
+/**
+ * A single binary file can exist after a partial/corrupt Steam install.
+ * Require key install markers before treating RustDedicated as ready.
+ */
+function isRustDedicatedInstallReady(): boolean {
+  if (!isRustDedicatedBinaryPresent()) return false
+  const installDir = getRustInstallRoot()
+  const dataDir = path.join(installDir, 'RustDedicated_Data')
+  const appManifest = path.join(installDir, 'steamapps', `appmanifest_${RUST_DS_APP_ID}.acf`)
+  try {
+    return fs.existsSync(dataDir) && fs.existsSync(appManifest)
+  } catch {
+    return false
+  }
+}
+
 /** Configured preference only; actual path may be an auto-downloaded copy under OXIDIZED_STEAMCMD_DIR. */
 export function getSteamCmdScript(): string {
   return (process.env.STEAMCMD_SCRIPT ?? '/opt/steamcmd/steamcmd.sh').trim()
@@ -157,7 +173,7 @@ export function initRustInstallState() {
     })
     return
   }
-  if (isRustDedicatedBinaryPresent()) {
+  if (isRustDedicatedInstallReady()) {
     installState = 'ready'
     coreLog('rust-install', 'RustDedicated already present at startup', {
       path: getRustDedicatedBinaryPath(),
@@ -253,7 +269,7 @@ async function runSteamCmdInstall(): Promise<void> {
     child.on('close', (code) => {
       logStream.end()
       coreLog('rust-install', 'SteamCMD process exited', { code, logPath })
-      const present = isRustDedicatedBinaryPresent()
+      const ready = isRustDedicatedInstallReady()
       if (code === 0) {
         try {
           if (!isWindowsHost()) {
@@ -263,20 +279,20 @@ async function runSteamCmdInstall(): Promise<void> {
         } catch {
           /* non-fatal */
         }
-        if (present) {
-          coreLog('rust-install', 'RustDedicated binary is present', { path: getRustDedicatedBinaryPath() })
+        if (ready) {
+          coreLog('rust-install', 'RustDedicated install is ready', { path: getRustDedicatedBinaryPath() })
           resolve()
         } else {
           reject(
             new Error(
-              `SteamCMD finished but RustDedicated not found under ${installDir}. See steamcmd-install.log`
+              `SteamCMD finished but RustDedicated install is incomplete under ${installDir}. See steamcmd-install.log`
             )
           )
         }
-      } else if (present) {
+      } else if (ready) {
         // Windows SteamCMD often self-updates after app_update and exits non-zero (e.g. 7) even when the game
         // install completed — log shows "Success! App '258550' fully installed" before the updater runs.
-        coreWarn('rust-install', 'SteamCMD exited non-zero but RustDedicated is present; treating as success', {
+        coreWarn('rust-install', 'SteamCMD exited non-zero but RustDedicated install is ready; treating as success', {
           code,
           path: getRustDedicatedBinaryPath(),
         })
@@ -303,9 +319,9 @@ export function scheduleRustDedicatedInstall(onFinish: () => void): void {
     onFinish()
     return
   }
-  if (isRustDedicatedBinaryPresent()) {
+  if (isRustDedicatedInstallReady()) {
     if (installState === 'error') {
-      coreLog('rust-install', 'scheduleRustDedicatedInstall: binary present; clearing stale error state')
+      coreLog('rust-install', 'scheduleRustDedicatedInstall: install ready; clearing stale error state')
     }
     installState = 'ready'
     lastError = null
@@ -352,6 +368,7 @@ export async function waitForRustDedicatedOrThrow(): Promise<void> {
     skipSteam: skipSteamInstall(),
     binaryPath: getRustDedicatedBinaryPath(),
     present: isRustDedicatedBinaryPresent(),
+    ready: isRustDedicatedInstallReady(),
     installState,
   })
   if (skipSteamInstall()) return
@@ -362,7 +379,7 @@ export async function waitForRustDedicatedOrThrow(): Promise<void> {
     return
   }
 
-  if (isRustDedicatedBinaryPresent()) {
+  if (isRustDedicatedInstallReady()) {
     if (installState === 'error') {
       coreLog('rust-install', 'RustDedicated on disk; clearing stale error (e.g. Windows SteamCMD exit 7 after success)', {
         path: getRustDedicatedBinaryPath(),
@@ -371,11 +388,11 @@ export async function waitForRustDedicatedOrThrow(): Promise<void> {
     installState = 'ready'
     lastError = null
     notifyRustInstallState()
-    coreLog('rust-install', 'waitForRustDedicatedOrThrow: binary already present')
+    coreLog('rust-install', 'waitForRustDedicatedOrThrow: install already ready')
     return
   }
 
-  if (!isRustDedicatedBinaryPresent()) {
+  if (!isRustDedicatedInstallReady()) {
     if (installState === 'error') {
       throw new Error(lastError || 'Steam install failed')
     }
@@ -390,6 +407,7 @@ export async function waitForRustDedicatedOrThrow(): Promise<void> {
       coreLog('rust-install', 'waitForRustDedicatedOrThrow: SteamCMD promise settled', {
         installState,
         present: isRustDedicatedBinaryPresent(),
+        ready: isRustDedicatedInstallReady(),
       })
     }
   }
@@ -397,7 +415,7 @@ export async function waitForRustDedicatedOrThrow(): Promise<void> {
   if (installState === 'error') {
     throw new Error(lastError || 'Steam install failed')
   }
-  if (!isRustDedicatedBinaryPresent()) {
+  if (!isRustDedicatedInstallReady()) {
     throw new Error(
       'Rust dedicated is not installed yet. Wait for the Steam download to finish (check the banner), then try Start again.'
     )

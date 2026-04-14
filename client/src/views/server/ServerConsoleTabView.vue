@@ -89,18 +89,18 @@ function clearConsoleView() {
       <div
         class="flex flex-col gap-2 border-b border-slate-800/80 bg-slate-900/50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
       >
-        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Log & RCON</h2>
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-500">Console</h2>
         <div class="flex flex-wrap gap-1.5">
           <button
             type="button"
-            class="rounded border border-slate-600/80 px-2 py-1 text-xs text-slate-400 hover:border-slate-500 hover:text-slate-200"
+            class="rounded-lg border border-slate-600/80 px-3 py-1.5 text-sm text-slate-400 hover:border-slate-500 hover:text-slate-200"
             @click="clearConsoleView"
           >
             Clear
           </button>
           <button
             type="button"
-            class="rounded border border-slate-600/80 px-2 py-1 text-xs text-slate-400 hover:border-slate-500 hover:text-slate-200"
+            class="rounded-lg border border-slate-600/80 px-3 py-1.5 text-sm text-slate-400 hover:border-slate-500 hover:text-slate-200"
             @click="store.fetchServerLogHistory(serverId)"
           >
             Reload log
@@ -110,27 +110,27 @@ function clearConsoleView() {
 
       <div
         v-if="!server.rcon_enabled"
-        class="border-b border-slate-800/80 bg-slate-900/35 px-3 py-2 text-xs text-slate-500"
+        class="border-b border-slate-800/80 bg-slate-900/35 px-4 py-2.5 text-sm text-slate-500"
         role="status"
       >
-        RCON is off — turn it on under
-        <RouterLink :to="{ name: 'server-settings', params: { id: String(server.id) } }" class="text-slate-300 underline underline-offset-2"
-          >Settings</RouterLink
-        >.
+        RCON off —
+        <RouterLink
+          :to="{ name: 'server-general', params: { id: String(server.id) } }"
+          class="text-slate-300 underline underline-offset-2"
+          >General</RouterLink
+        >
       </div>
 
       <div
         ref="consoleScroll"
-        class="max-h-[min(380px,45vh)] overflow-auto bg-[#0a0e14] px-3 py-2 font-mono text-[11px] leading-relaxed"
+        class="max-h-[min(28rem,52vh)] overflow-auto bg-[#0a0e14] px-4 py-3 font-mono text-sm leading-relaxed"
         role="log"
         aria-live="polite"
       >
-        <pre class="whitespace-pre-wrap break-words text-slate-400">{{
-          processLogText || '— No output yet. Start the server from General.'
-        }}</pre>
+        <pre class="whitespace-pre-wrap break-words text-slate-400">{{ processLogText || '—' }}</pre>
 
         <div v-if="server.rcon_enabled" class="mt-2 border-t border-slate-800/70 pt-2">
-          <p class="mb-1 text-[10px] font-medium uppercase text-slate-600">RCON</p>
+          <p class="mb-1 text-xs font-medium uppercase text-slate-600">RCON</p>
           <div class="space-y-1">
             <p
               v-for="(line, i) in outputLines"
@@ -144,37 +144,24 @@ function clearConsoleView() {
             >
               {{ line.text }}
             </p>
-            <p v-if="!outputLines.length" class="text-slate-600">
-              {{ server.status === 'running' ? 'Enter a command below.' : 'Start the server to use RCON.' }}
-            </p>
+            <p v-if="!outputLines.length" class="text-slate-600">—</p>
           </div>
         </div>
       </div>
 
-      <div
-        v-if="server.rcon_enabled && server.status !== 'running'"
-        class="border-t border-slate-800/80 bg-amber-950/15 px-3 py-2 text-xs text-amber-200/85"
-      >
-        Start the server from the
-        <RouterLink :to="{ name: 'server-general', params: { id: String(server.id) } }" class="font-medium text-amber-300 underline underline-offset-2"
-          >General</RouterLink
-        >
-        tab.
-      </div>
-
-      <form class="flex gap-2 border-t border-slate-800/80 bg-slate-900/30 p-3" @submit.prevent="runCommand">
+      <form class="flex gap-3 border-t border-slate-800/80 bg-slate-900/30 p-4" @submit.prevent="runCommand">
         <label class="sr-only" for="rcon-cmd">RCON command</label>
         <input
           id="rcon-cmd"
           v-model="command"
           :disabled="running || server.status !== 'running' || !server.rcon_enabled"
           placeholder="RCON command…"
-          class="min-w-0 flex-1 rounded border border-slate-700/90 bg-slate-950 px-2.5 py-2 text-xs text-slate-200 placeholder:text-slate-600 outline-none focus:border-blue-600/60 disabled:opacity-50"
+          class="min-w-0 flex-1 rounded-lg border border-slate-700/90 bg-slate-950 px-3 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:border-blue-600/60 disabled:opacity-50"
         />
         <button
           type="submit"
           :disabled="running || !command.trim() || server.status !== 'running' || !server.rcon_enabled"
-          class="shrink-0 rounded bg-blue-600 px-4 py-2 font-sans text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40"
+          class="shrink-0 rounded-lg bg-blue-600 px-5 py-2.5 font-sans text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-40"
         >
           Run
         </button>

@@ -11,6 +11,20 @@ const serversSorted = computed(() =>
   [...store.servers].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id - b.id)
 )
 
+const runningCount = computed(() => serversSorted.value.filter((s) => s.status === 'running').length)
+const startingCount = computed(() => serversSorted.value.filter((s) => s.status === 'starting').length)
+const errorCount = computed(() => serversSorted.value.filter((s) => s.status === 'error').length)
+
+const summaryLine = computed(() => {
+  const n = serversSorted.value.length
+  if (n === 0) return null
+  const parts: string[] = [`${n} server${n === 1 ? '' : 's'}`]
+  if (runningCount.value) parts.push(`${runningCount.value} running`)
+  if (startingCount.value) parts.push(`${startingCount.value} starting`)
+  if (errorCount.value) parts.push(`${errorCount.value} error`)
+  return parts.join(' · ')
+})
+
 onMounted(async () => {
   store.attachSocket()
   await Promise.all([store.fetchServers(), store.fetchSystem()])
@@ -41,13 +55,26 @@ function statusLabel(s: ServerStatus): string {
 function statusPillClass(s: ServerStatus): string {
   switch (s) {
     case 'running':
-      return 'bg-emerald-950/80 text-emerald-200 ring-1 ring-emerald-700/50'
+      return 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/25'
     case 'starting':
-      return 'bg-amber-950/80 text-amber-200 ring-1 ring-amber-700/50'
+      return 'bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/25'
     case 'error':
-      return 'bg-red-950/80 text-red-200 ring-1 ring-red-700/50'
+      return 'bg-red-500/15 text-red-300 ring-1 ring-red-500/25'
     default:
-      return 'bg-slate-800 text-slate-300 ring-1 ring-slate-600/80'
+      return 'bg-slate-700/50 text-slate-400 ring-1 ring-slate-600/50'
+  }
+}
+
+function cardAccentClass(s: ServerStatus): string {
+  switch (s) {
+    case 'running':
+      return 'border-l-emerald-500/70'
+    case 'starting':
+      return 'border-l-amber-500/70'
+    case 'error':
+      return 'border-l-red-500/70'
+    default:
+      return 'border-l-slate-600'
   }
 }
 
@@ -72,162 +99,201 @@ async function onStop(id: number) {
     busyId.value = null
   }
 }
+
 </script>
 
 <template>
-  <div class="space-y-6">
-    <!-- Steam -->
+  <div class="space-y-10">
     <div
       v-if="store.rustInstall?.status === 'downloading'"
-      class="rounded-lg bg-amber-950/35 px-4 py-3 text-sm leading-relaxed ring-1 ring-amber-800/40"
+      class="flex items-center gap-3 rounded-xl border border-amber-800/40 bg-amber-950/25 px-4 py-3"
       role="status"
     >
-      <p class="font-medium text-amber-100">Downloading Rust dedicated server</p>
-      <p class="mt-1.5 text-slate-400">
-        {{ store.rustInstall?.rustSteamPlatform ?? 'linux' }} build for
-        {{ store.rustInstall?.hostPlatformLabel ?? 'this computer' }}. Finish this before starting a server.
-      </p>
+      <span class="relative flex h-2.5 w-2.5 shrink-0">
+        <span
+          class="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400/60 opacity-75"
+        />
+        <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-400" />
+      </span>
+      <p class="text-sm text-amber-100/95">Downloading Rust dedicated…</p>
     </div>
 
     <div
       v-if="store.rustInstall?.status === 'error'"
-      class="rounded-lg bg-red-950/35 px-4 py-3 text-sm ring-1 ring-red-800/40"
+      class="rounded-xl border border-red-800/45 bg-red-950/20 px-4 py-3"
       role="alert"
     >
-      <p class="font-medium text-red-100">Steam install failed</p>
-      <p class="mt-1.5 break-words leading-relaxed text-red-200/90">{{ store.rustInstall.error }}</p>
+      <p class="text-sm font-medium text-red-200">Steam install failed</p>
+      <p class="mt-1 break-words text-sm text-red-300/85">{{ store.rustInstall.error }}</p>
     </div>
 
-    <header class="flex flex-wrap items-center justify-between gap-3">
-      <h1 class="text-2xl font-semibold tracking-tight text-slate-50">Servers</h1>
+    <header class="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <h1 class="text-3xl font-semibold tracking-tight text-slate-50 sm:text-4xl">Servers</h1>
+        <p v-if="summaryLine" class="mt-2 text-base text-slate-500">{{ summaryLine }}</p>
+      </div>
       <RouterLink
         to="/servers/new"
-        class="rounded-md bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+        class="inline-flex shrink-0 items-center justify-center gap-2.5 rounded-xl bg-blue-600 px-5 py-3 text-base font-medium text-white shadow-lg shadow-blue-950/30 transition hover:bg-blue-500"
       >
+        <svg class="h-5 w-5 opacity-90" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"
+          />
+        </svg>
         New server
       </RouterLink>
     </header>
 
-    <div v-if="store.loading" class="space-y-2" aria-busy="true">
-      <div v-for="n in 4" :key="n" class="animate-pulse rounded-lg bg-slate-900/50 py-2.5 ring-1 ring-slate-800/80">
-        <div class="mx-3 flex items-center gap-4">
-          <div class="h-3.5 w-32 rounded bg-slate-800" />
-          <div class="h-3.5 w-16 rounded bg-slate-800/80" />
-          <div class="hidden h-3.5 flex-1 rounded bg-slate-800/60 sm:block" />
+    <div v-if="store.loading" class="grid gap-5 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true">
+      <div
+        v-for="n in 6"
+        :key="n"
+        class="animate-pulse rounded-xl border border-slate-800/80 bg-slate-900/30 p-6"
+      >
+        <div class="h-5 w-2/3 max-w-[12rem] rounded bg-slate-800" />
+        <div class="mt-4 h-4 w-full rounded bg-slate-800/70" />
+        <div class="mt-2 h-4 w-4/5 rounded bg-slate-800/50" />
+        <div class="mt-6 flex gap-2">
+          <div class="h-9 w-16 rounded-lg bg-slate-800/80" />
+          <div class="h-9 w-16 rounded-lg bg-slate-800/60" />
         </div>
       </div>
     </div>
 
-    <p v-else-if="store.error" class="text-sm leading-relaxed text-red-300" role="alert">{{ store.error }}</p>
+    <p v-else-if="store.error" class="rounded-xl border border-red-900/50 bg-red-950/20 px-4 py-3 text-sm text-red-300" role="alert">
+      {{ store.error }}
+    </p>
 
-    <div v-else-if="serversSorted.length" class="overflow-x-auto rounded-lg ring-1 ring-slate-800/80">
-      <div class="min-w-[640px] divide-y divide-slate-800/80 bg-slate-900/25">
-        <div
-          class="grid grid-cols-[minmax(0,1.2fr)_auto_minmax(0,1.4fr)_auto] gap-2 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-slate-600 sm:px-4"
-        >
-          <span>Server</span>
-          <span class="text-center">Status</span>
-          <span class="hidden sm:block">Ports / world</span>
-          <span class="text-right">Actions</span>
-        </div>
-
-        <TransitionGroup name="server-row" tag="div" class="divide-y divide-slate-800/80">
-          <div
-            v-for="s in serversSorted"
-            :key="s.id"
-            class="grid grid-cols-[minmax(0,1.2fr)_auto_minmax(0,1.4fr)_auto] items-center gap-2 px-3 py-2 sm:px-4 sm:py-2.5"
-          >
-            <div class="min-w-0">
-              <RouterLink
-                :to="{ name: 'server-general', params: { id: String(s.id) } }"
-                class="block truncate text-sm font-medium text-slate-100 hover:text-blue-400"
-              >
-                {{ s.name }}
-              </RouterLink>
-              <p class="truncate text-[11px] text-slate-600">{{ s.instance_slug }}</p>
-            </div>
-
-            <div class="flex justify-center">
-              <span
-                class="whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium sm:text-xs"
-                :class="statusPillClass(s.status)"
-              >
-                {{ statusLabel(s.status) }}
-              </span>
-            </div>
-
-            <div class="hidden min-w-0 font-mono text-[10px] leading-snug text-slate-500 sm:block">
-              <span class="tabular-nums">{{ s.game_port }}/{{ s.rcon_port }}/{{ s.query_port }}/{{ s.companion_tcp_port }}</span>
-              <span class="ml-1 font-sans text-slate-600">udp/tcp</span>
-              <span class="block truncate text-slate-600">
-                {{ s.map_worldsize }} · seed {{ s.map_seed }} · {{ s.max_players }} pl
-              </span>
-            </div>
-
-            <div class="flex flex-wrap items-center justify-end gap-1">
-              <button
-                v-if="s.status !== 'running' && s.status !== 'starting'"
-                type="button"
-                class="rounded border border-blue-600/50 bg-blue-600/90 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-                :disabled="busyId === s.id"
-                @click="onStart(s.id)"
-              >
-                {{ busyId === s.id ? '…' : 'Start' }}
-              </button>
-              <button
-                v-if="s.status === 'running' || s.status === 'starting'"
-                type="button"
-                class="rounded border border-slate-600 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50"
-                :disabled="busyId === s.id"
-                @click="onStop(s.id)"
-              >
-                Stop
-              </button>
-              <RouterLink
-                :to="{ name: 'server-general', params: { id: String(s.id) } }"
-                class="rounded border border-slate-600/80 px-2 py-1 text-[11px] font-medium text-slate-300 hover:bg-slate-800/50"
-              >
-                Open
-              </RouterLink>
-              <button
-                type="button"
-                class="rounded bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
-                :disabled="s.status === 'running' || s.status === 'starting'"
-                title="Delete server (stop it first)"
-                @click="onDelete(s.id)"
-              >
-                Delete
-              </button>
-            </div>
+    <TransitionGroup
+      v-else-if="serversSorted.length"
+      name="server-card"
+      tag="div"
+      class="grid gap-5 sm:grid-cols-2 xl:grid-cols-3"
+    >
+      <article
+        v-for="s in serversSorted"
+        :key="s.id"
+        class="group flex flex-col rounded-2xl border border-slate-800/90 border-l-[4px] bg-slate-900/35 p-6 shadow-sm transition hover:border-slate-700/90 hover:bg-slate-900/50"
+        :class="cardAccentClass(s.status)"
+      >
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <RouterLink
+              :to="{ name: 'server-general', params: { id: String(s.id) } }"
+              class="block truncate text-xl font-semibold tracking-tight text-slate-100 transition group-hover:text-blue-400"
+            >
+              {{ s.name }}
+            </RouterLink>
+            <p class="mt-1 truncate font-mono text-sm text-slate-600">{{ s.instance_slug }}</p>
           </div>
-        </TransitionGroup>
-      </div>
-    </div>
+          <span
+            class="shrink-0 rounded-full px-3 py-1.5 text-sm font-medium tabular-nums"
+            :class="statusPillClass(s.status)"
+          >
+            {{ statusLabel(s.status) }}
+          </span>
+        </div>
 
-    <div v-else class="rounded-lg bg-slate-900/40 px-5 py-10 text-center ring-1 ring-slate-800/80">
-      <p class="text-sm font-medium text-slate-300">No servers yet</p>
-      <p class="mt-1.5 text-sm leading-relaxed text-slate-500">
-        Create one, then start it when the game files finish downloading.
-      </p>
+        <dl class="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-4">
+          <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-slate-600">Game</dt>
+            <dd class="mt-1 font-mono text-base tabular-nums text-slate-200">{{ s.game_port }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-slate-600">RCON</dt>
+            <dd class="mt-1 font-mono text-base tabular-nums text-slate-200">{{ s.rcon_port }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-slate-600">Query</dt>
+            <dd class="mt-1 font-mono text-base tabular-nums text-slate-200">{{ s.query_port }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium uppercase tracking-wider text-slate-600">Rust+</dt>
+            <dd class="mt-1 font-mono text-base tabular-nums text-slate-200">
+              {{ s.companion_enabled ? s.companion_tcp_port : '—' }}
+            </dd>
+          </div>
+        </dl>
+
+        <p class="mt-4 truncate text-sm text-slate-500">
+          Map {{ s.map_worldsize.toLocaleString() }} · Seed {{ s.map_seed.toLocaleString() }} ·
+          {{ s.max_players.toLocaleString() }} players
+        </p>
+
+        <div class="mt-6 flex flex-wrap gap-2.5 border-t border-slate-800/80 pt-5">
+          <button
+            v-if="s.status !== 'running' && s.status !== 'starting'"
+            type="button"
+            class="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
+            :disabled="busyId === s.id"
+            @click="onStart(s.id)"
+          >
+            {{ busyId === s.id ? '…' : 'Start' }}
+          </button>
+          <button
+            v-if="s.status === 'running' || s.status === 'starting'"
+            type="button"
+            class="rounded-lg border border-slate-600 bg-slate-800/40 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+            :disabled="busyId === s.id"
+            @click="onStop(s.id)"
+          >
+            Stop
+          </button>
+          <RouterLink
+            :to="{ name: 'server-general', params: { id: String(s.id) } }"
+            class="rounded-lg border border-slate-600/90 px-4 py-2.5 text-sm font-medium text-slate-300 transition hover:border-slate-500 hover:bg-slate-800/40"
+          >
+            Open
+          </RouterLink>
+          <button
+            type="button"
+            class="ml-auto rounded-lg border border-transparent px-4 py-2.5 text-sm font-medium text-red-400/90 transition hover:bg-red-950/40 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-30"
+            :disabled="s.status === 'running' || s.status === 'starting'"
+            title="Stop server first"
+            @click="onDelete(s.id)"
+          >
+            Delete
+          </button>
+        </div>
+      </article>
+    </TransitionGroup>
+
+    <div
+      v-else
+      class="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-700/80 bg-slate-900/25 px-8 py-20 text-center"
+    >
+      <div class="rounded-full bg-slate-800/80 p-5 ring-1 ring-slate-700/60">
+        <svg class="h-12 w-12 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="1.5"
+            d="M5 12h14M12 5v14"
+          />
+        </svg>
+      </div>
+      <p class="mt-6 text-lg font-medium text-slate-300">No servers yet</p>
+      <p class="mt-2 max-w-md text-base text-slate-500">Create a server to get started.</p>
       <RouterLink
         to="/servers/new"
-        class="mt-4 inline-block rounded-md bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-500"
+        class="mt-8 rounded-xl bg-blue-600 px-6 py-3 text-base font-medium text-white transition hover:bg-blue-500"
       >
-        Create server
+        New server
       </RouterLink>
     </div>
   </div>
 </template>
 
 <style scoped>
-.server-row-move,
-.server-row-enter-active,
-.server-row-leave-active {
-  transition: opacity 0.18s ease, transform 0.18s ease;
+.server-card-move,
+.server-card-enter-active,
+.server-card-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
-.server-row-enter-from,
-.server-row-leave-to {
+.server-card-enter-from,
+.server-card-leave-to {
   opacity: 0;
-  transform: translateY(-3px);
+  transform: translateY(8px);
 }
 </style>

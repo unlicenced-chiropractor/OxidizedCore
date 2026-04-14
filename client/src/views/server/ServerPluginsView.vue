@@ -3,19 +3,6 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 
-type UmodPlugin = { slug: string; title: string; url: string }
-
-type UmodApiResponse = {
-  ok?: boolean
-  error?: string
-  source?: 'live' | 'fallback'
-  note?: string
-  catalogUrl?: string
-  page?: number
-  plugins?: UmodPlugin[]
-  hasNext?: boolean
-}
-
 type GithubRepo = {
   name: string
   fullName: string
@@ -35,53 +22,117 @@ type GithubApiResponse = {
   items?: GithubRepo[]
 }
 
+type InstallResponse = {
+  ok?: boolean
+  error?: string
+  code?: string
+  conflicting?: string[]
+  written?: string[]
+}
+
+type InstalledPlugin = { name: string; size: number; mtimeMs: number }
+
 const route = useRoute()
 const store = useServersStore()
 const serverId = computed(() => String(route.params.id))
 
-const listSource = ref<'umod' | 'github'>('umod')
-
 const page = ref(1)
 const loading = ref(false)
 const loadError = ref<string | null>(null)
-const catalogSource = ref<'live' | 'fallback'>('live')
-const catalogNote = ref<string | null>(null)
-const catalogUrl = ref('https://umod.org/plugins?page=1&sort=title&sortdir=asc')
-const plugins = ref<UmodPlugin[]>([])
+const items = ref<GithubRepo[]>([])
 const hasNext = ref(false)
+const total = ref(0)
+const rateRemaining = ref<number | null>(null)
+const sort = ref<'stars' | 'updated'>('stars')
 
-const ghPage = ref(1)
-const ghLoading = ref(false)
-const ghError = ref<string | null>(null)
-const ghItems = ref<GithubRepo[]>([])
-const ghHasNext = ref(false)
-const ghTotal = ref(0)
-const ghRateRemaining = ref<number | null>(null)
-const ghSort = ref<'stars' | 'updated'>('stars')
+const searchDraft = ref('')
+const appliedQuery = ref('')
 
-async function loadUmod() {
+const installed = ref<InstalledPlugin[]>([])
+const installedLoading = ref(false)
+const installedError = ref<string | null>(null)
+
+const installing = ref<string | null>(null)
+const uninstalling = ref<string | null>(null)
+const installMessage = ref<string | null>(null)
+const installError = ref<string | null>(null)
+
+function pluginStem(name: string) {
+  return name.replace(/\.cs$/i, '').toLowerCase()
+}
+
+const installedStemSet = computed(() => new Set(installed.value.map((p) => pluginStem(p.name))))
+
+function repoLikelyInstalled(repo: GithubRepo): boolean {
+  return installedStemSet.value.has(repo.name.toLowerCase())
+}
+
+async function loadInstalled() {
+  installedLoading.value = true
+  installedError.value = null
+  try {
+    const res = await fetch(`/api/servers/${serverId.value}/plugins/installed`)
+    const data = (await res.json()) as { ok?: boolean; plugins?: InstalledPlugin[]; error?: string }
+    if (!res.ok || data.ok === false) {
+      installed.value = []
+      installedError.value = typeof data.error === 'string' ? data.error : res.statusText
+      return
+    }
+    installed.value = Array.isArray(data.plugins) ? data.plugins : []
+  } catch (e) {
+    installed.value = []
+    installedError.value = e instanceof Error ? e.message : 'Request failed'
+  } finally {
+    installedLoading.value = false
+  }
+}
+
+async function uninstallPlugin(fileName: string) {
+  if (!confirm(`Remove ${fileName}?`)) return
+  uninstalling.value = fileName
+  installError.value = null
+  installMessage.value = null
+  try {
+    const q = new URLSearchParams({ file: fileName })
+    const res = await fetch(`/api/servers/${serverId.value}/plugins/installed?${q}`, { method: 'DELETE' })
+    const data = (await res.json()) as { ok?: boolean; error?: string }
+    if (!res.ok || data.ok === false) {
+      installError.value = typeof data.error === 'string' ? data.error : res.statusText
+      return
+    }
+    installMessage.value = `Removed ${fileName}.`
+    await loadInstalled()
+  } catch (e) {
+    installError.value = e instanceof Error ? e.message : 'Request failed'
+  } finally {
+    uninstalling.value = null
+  }
+}
+
+async function loadList() {
   loading.value = true
   loadError.value = null
-  catalogNote.value = null
   try {
     const q = new URLSearchParams({
       page: String(page.value),
-      sort: 'title',
-      sortdir: 'asc',
+      sort: sort.value,
+      order: 'desc',
     })
-    const res = await fetch(`/api/umod/plugins?${q}`)
-    const data = (await res.json()) as UmodApiResponse
+    if (appliedQuery.value.trim()) q.set('q', appliedQuery.value.trim())
+    const res = await fetch(`/api/github/oxide-plugins?${q}`)
+    const data = (await res.json()) as GithubApiResponse
+    rateRemaining.value =
+      typeof data.rateLimitRemaining === 'number' ? data.rateLimitRemaining : null
     if (!res.ok || data.ok === false) {
-      plugins.value = []
+      items.value = []
       hasNext.value = false
+      total.value = 0
       loadError.value = typeof data.error === 'string' ? data.error : res.statusText
       return
     }
-    if (typeof data.catalogUrl === 'string') catalogUrl.value = data.catalogUrl
-    plugins.value = Array.isArray(data.plugins) ? data.plugins : []
+    items.value = Array.isArray(data.items) ? data.items : []
     hasNext.value = !!data.hasNext
-    catalogSource.value = data.source === 'live' ? 'live' : 'fallback'
-    catalogNote.value = typeof data.note === 'string' && data.note.length ? data.note : null
+    total.value = typeof data.totalCount === 'number' ? data.totalCount : 0
   } catch (e) {
     loadError.value = e instanceof Error ? e.message : 'Request failed'
   } finally {
@@ -89,314 +140,214 @@ async function loadUmod() {
   }
 }
 
-async function loadGithub() {
-  ghLoading.value = true
-  ghError.value = null
+async function installRepo(fullName: string) {
+  installMessage.value = null
+  installError.value = null
+  installing.value = fullName
   try {
-    const q = new URLSearchParams({
-      page: String(ghPage.value),
-      sort: ghSort.value,
-      order: 'desc',
+    const res = await fetch(`/api/servers/${serverId.value}/plugins/github-install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fullName }),
     })
-    const res = await fetch(`/api/github/oxide-plugins?${q}`)
-    const data = (await res.json()) as GithubApiResponse
-    ghRateRemaining.value =
-      typeof data.rateLimitRemaining === 'number' ? data.rateLimitRemaining : null
+    const data = (await res.json()) as InstallResponse
     if (!res.ok || data.ok === false) {
-      ghItems.value = []
-      ghHasNext.value = false
-      ghTotal.value = 0
-      ghError.value = typeof data.error === 'string' ? data.error : res.statusText
+      installError.value = typeof data.error === 'string' ? data.error : res.statusText
       return
     }
-    ghItems.value = Array.isArray(data.items) ? data.items : []
-    ghHasNext.value = !!data.hasNext
-    ghTotal.value = typeof data.totalCount === 'number' ? data.totalCount : 0
+    const files = Array.isArray(data.written) ? data.written.join(', ') : ''
+    installMessage.value = files ? `Installed: ${files}` : 'Installed.'
+    await loadInstalled()
   } catch (e) {
-    ghError.value = e instanceof Error ? e.message : 'Request failed'
+    installError.value = e instanceof Error ? e.message : 'Request failed'
   } finally {
-    ghLoading.value = false
+    installing.value = null
   }
+}
+
+function submitSearch() {
+  appliedQuery.value = searchDraft.value.trim()
+  page.value = 1
+  void loadList()
+}
+
+function clearSearch() {
+  searchDraft.value = ''
+  appliedQuery.value = ''
+  page.value = 1
+  void loadList()
 }
 
 onMounted(async () => {
   await store.fetchSystem()
-  if (store.oxideInstalled) void loadUmod()
-})
-
-watch(page, () => {
-  if (store.oxideInstalled && listSource.value === 'umod') void loadUmod()
-})
-
-watch(ghPage, () => {
-  if (store.oxideInstalled && listSource.value === 'github') void loadGithub()
-})
-
-watch(ghSort, () => {
-  if (store.oxideInstalled && listSource.value === 'github') {
-    ghPage.value = 1
-    void loadGithub()
+  if (store.oxideInstalled) {
+    void loadInstalled()
+    void loadList()
   }
 })
 
-watch(listSource, (src) => {
-  if (!store.oxideInstalled) return
-  if (src === 'umod') void loadUmod()
-  else void loadGithub()
+watch(page, () => {
+  if (store.oxideInstalled) void loadList()
 })
 
-const tabBtn =
-  'rounded-md px-3 py-1.5 text-xs font-medium transition border border-transparent'
-const tabBtnActive = 'border-slate-600 bg-slate-800/80 text-slate-100'
-const tabBtnIdle = 'text-slate-500 hover:bg-slate-800/50 hover:text-slate-300'
+watch(sort, () => {
+  if (!store.oxideInstalled) return
+  page.value = 1
+  void loadList()
+})
 </script>
 
 <template>
   <div v-if="!store.oxideInstalled" class="rounded-lg border border-slate-800/80 bg-slate-900/25 px-4 py-6 text-sm text-slate-400">
-    <p class="font-medium text-slate-300">Oxide not detected</p>
-    <p class="mt-2 leading-relaxed">
-      The Plugins tab appears when <code class="rounded bg-slate-950 px-1 py-0.5 text-[11px]">Oxide.Core.dll</code> is present in your Rust dedicated install. Enable Oxide for this server and start it once so the panel can merge Oxide into the shared game files.
-    </p>
+    <p class="text-slate-300">Oxide not available.</p>
     <RouterLink
-      :to="{ name: 'server-settings', params: { id: serverId } }"
-      class="mt-4 inline-block text-sm font-medium text-blue-400 hover:text-blue-300"
+      :to="{ name: 'server-general', params: { id: serverId } }"
+      class="mt-3 inline-block text-sm text-blue-400 hover:text-blue-300"
     >
-      Open Settings →
+      General
     </RouterLink>
   </div>
 
-  <div v-else class="space-y-4">
-    <div class="flex flex-wrap items-center gap-2">
-      <span class="text-[11px] font-medium uppercase tracking-wide text-slate-600">Source</span>
-      <div class="inline-flex rounded-lg border border-slate-800/90 p-0.5">
-        <button
-          type="button"
-          :class="[tabBtn, listSource === 'umod' ? tabBtnActive : tabBtnIdle]"
-          @click="listSource = 'umod'"
-        >
-          uMod
-        </button>
-        <button
-          type="button"
-          :class="[tabBtn, listSource === 'github' ? tabBtnActive : tabBtnIdle]"
-          @click="listSource = 'github'"
-        >
-          GitHub API
-        </button>
-      </div>
-    </div>
-
-    <!-- uMod -->
-    <template v-if="listSource === 'umod'">
-      <p class="text-xs leading-relaxed text-slate-500">
-        <template v-if="catalogSource === 'live'">
-          Plugins from the
-          <a
-            :href="catalogUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="text-blue-400 underline underline-offset-2 hover:text-blue-300"
-            >uMod catalog</a
-          >
-          (live, sorted A–Z).
-        </template>
-        <template v-else>
-          Bundled starter list (same A–Z order as uMod’s title sort). For every plugin on uMod, use
-          <a
-            :href="catalogUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="text-blue-400 underline underline-offset-2 hover:text-blue-300"
-            >the full catalog</a
-          >.
-        </template>
-        Install by downloading the <code class="rounded bg-slate-900 px-1 py-0.5 text-[11px]">.cs</code> file into your server’s
-        <code class="rounded bg-slate-900 px-1 py-0.5 text-[11px]">oxide/plugins</code> folder, then reload the plugin or restart.
-      </p>
-
-      <div
-        v-if="catalogNote"
-        class="rounded-lg border border-slate-700/80 bg-slate-900/45 px-4 py-3 text-xs leading-relaxed text-slate-400"
-        role="status"
-      >
-        <p>{{ catalogNote }}</p>
-        <a
-          :href="catalogUrl"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="mt-2 inline-block font-medium text-blue-400 underline underline-offset-2 hover:text-blue-300"
-        >
-          Open full uMod.org catalog →
-        </a>
-      </div>
-
-      <p v-if="loadError" class="text-sm text-red-300" role="alert">{{ loadError }}</p>
-
+  <div v-else class="space-y-8">
+    <section class="rounded-lg border border-slate-800/80 bg-slate-900/20 px-4 py-4">
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <div class="flex items-center gap-2">
-          <button
-            type="button"
-            class="rounded border border-slate-600 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-40"
-            :disabled="loading || page <= 1"
-            @click="page = Math.max(1, page - 1)"
-          >
-            Previous
-          </button>
-          <span class="text-xs tabular-nums text-slate-500">Page {{ page }}</span>
-          <button
-            type="button"
-            class="rounded border border-slate-600 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-40"
-            :disabled="loading || !hasNext"
-            @click="page += 1"
-          >
-            Next
-          </button>
-        </div>
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Installed</h2>
         <button
           type="button"
-          class="rounded border border-slate-600 px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-800/60"
-          :disabled="loading"
-          @click="loadUmod"
+          class="rounded border border-slate-600 px-2 py-1 text-xs text-slate-400 hover:bg-slate-800/60 disabled:opacity-40"
+          :disabled="installedLoading"
+          @click="loadInstalled"
         >
           Refresh
         </button>
       </div>
-
-      <div
-        v-if="loading"
-        class="rounded-lg border border-slate-800/80 bg-slate-900/30 px-4 py-8 text-center text-sm text-slate-500"
-      >
-        Loading catalog…
-      </div>
-
-      <div
-        v-else-if="plugins.length === 0"
-        class="rounded-lg border border-slate-800/80 bg-slate-900/30 px-4 py-6 text-sm text-slate-500"
-      >
-        No plugin links were found on this page —
-        <a :href="catalogUrl" target="_blank" rel="noopener noreferrer" class="text-blue-400 underline">browse on uMod</a>.
-      </div>
-
-      <ul
-        v-else
-        class="max-h-[min(560px,60vh)] divide-y divide-slate-800/80 overflow-auto rounded-lg border border-slate-800/90 bg-slate-900/20"
-        role="list"
-      >
+      <p v-if="installedLoading" class="mt-2 text-sm text-slate-500">Loading…</p>
+      <p v-else-if="installedError" class="mt-2 text-sm text-red-300" role="alert">{{ installedError }}</p>
+      <p v-else-if="installed.length === 0" class="mt-2 text-sm text-slate-500">None (.cs in shared oxide/plugins).</p>
+      <ul v-else class="mt-3 divide-y divide-slate-800/80 rounded-md border border-slate-800/60">
         <li
-          v-for="pl in plugins"
-          :key="pl.slug"
-          class="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2.5 hover:bg-slate-900/40"
+          v-for="p in installed"
+          :key="p.name"
+          class="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
         >
-          <a
-            :href="pl.url"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="min-w-0 text-sm font-medium text-slate-200 hover:text-blue-400"
+          <span class="font-mono text-sm text-slate-200">{{ p.name }}</span>
+          <button
+            type="button"
+            class="rounded border border-red-900/60 bg-red-950/30 px-2.5 py-1 text-xs text-red-200 hover:bg-red-950/50 disabled:opacity-40"
+            :disabled="uninstalling !== null || installing !== null"
+            @click="uninstallPlugin(p.name)"
           >
-            {{ pl.title }}
-          </a>
-          <span class="font-mono text-[11px] text-slate-600">{{ pl.slug }}</span>
+            {{ uninstalling === p.name ? '…' : 'Uninstall' }}
+          </button>
         </li>
       </ul>
-    </template>
+    </section>
 
-    <!-- GitHub -->
-    <template v-else>
-      <p class="text-xs leading-relaxed text-slate-500">
-        Public repositories from the
-        <a
-          href="https://docs.github.com/en/rest/search/search?apiVersion=2022-11-28#search-repositories"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="text-blue-400 underline underline-offset-2 hover:text-blue-300"
-          >GitHub repository search API</a
-        >.
-        The panel merges separate searches (<code class="rounded bg-slate-950 px-1 py-0.5 text-[11px]">topic:oxide-plugins</code>,
-        <code class="rounded bg-slate-950 px-1 py-0.5 text-[11px]">topic:oxidemod</code>,
-        <code class="rounded bg-slate-950 px-1 py-0.5 text-[11px]">topic:rust-plugin</code>, all with
-        <code class="rounded bg-slate-950 px-1 py-0.5 text-[11px]">language:C#</code>) because GitHub does not allow
-        <code class="text-[11px]">OR</code> between topic filters. Not the same catalog as uMod.
-      </p>
-      <p class="text-xs text-slate-600">
-        For higher rate limits, set <code class="rounded bg-slate-950 px-1 py-0.5 text-[11px]">OXIDIZED_GITHUB_TOKEN</code> (classic PAT
-        <code class="text-[11px]">ghp_…</code> or fine-grained <code class="text-[11px]">github_pat_…</code>) on the API server.
-      </p>
+    <p v-if="loadError" class="text-sm text-red-300" role="alert">{{ loadError }}</p>
+    <p v-else-if="rateRemaining !== null && rateRemaining <= 5" class="text-xs text-amber-200/90" role="status">
+      GitHub rate limit low ({{ rateRemaining }}).
+    </p>
+    <p v-if="installError" class="text-sm text-red-300" role="alert">{{ installError }}</p>
+    <p v-else-if="installMessage" class="text-xs text-emerald-200/90" role="status">{{ installMessage }}</p>
 
-      <p v-if="ghError" class="text-sm text-red-300" role="alert">{{ ghError }}</p>
-      <p
-        v-else-if="ghRateRemaining !== null && ghRateRemaining <= 5"
-        class="text-xs text-amber-200/90"
-        role="status"
-      >
-        GitHub API rate limit low ({{ ghRateRemaining }} remaining). Add a token or wait before retrying.
-      </p>
-
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex flex-wrap items-center gap-2">
-          <label class="flex items-center gap-2 text-xs text-slate-500">
-            <span>Sort</span>
-            <select
-              v-model="ghSort"
-              class="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 outline-none focus:border-blue-600/50"
-            >
-              <option value="stars">Stars</option>
-              <option value="updated">Recently updated</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            class="rounded border border-slate-600 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-40"
-            :disabled="ghLoading || ghPage <= 1"
-            @click="ghPage = Math.max(1, ghPage - 1)"
-          >
-            Previous
-          </button>
-          <span class="text-xs tabular-nums text-slate-500">Page {{ ghPage }}</span>
-          <button
-            type="button"
-            class="rounded border border-slate-600 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-40"
-            :disabled="ghLoading || !ghHasNext"
-            @click="ghPage += 1"
-          >
-            Next
-          </button>
-        </div>
-        <span v-if="ghTotal > 0" class="text-xs text-slate-600">~{{ ghTotal.toLocaleString() }} repos (search cap 1000)</span>
+    <form class="flex flex-col gap-2 sm:flex-row sm:items-center" @submit.prevent="submitSearch">
+      <label class="sr-only" for="plugin-search">Search</label>
+      <input
+        id="plugin-search"
+        v-model="searchDraft"
+        type="search"
+        enterkeyhint="search"
+        placeholder="Search…"
+        class="min-w-0 flex-1 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:border-blue-600/50"
+      />
+      <div class="flex shrink-0 gap-2">
         <button
-          type="button"
-          class="rounded border border-slate-600 px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-800/60"
-          :disabled="ghLoading"
-          @click="loadGithub"
+          type="submit"
+          class="rounded border border-slate-600 bg-slate-800/80 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+          :disabled="loading"
         >
-          Refresh
+          Search
+        </button>
+        <button
+          v-if="appliedQuery"
+          type="button"
+          class="rounded border border-slate-700 px-3 py-2 text-xs text-slate-400 hover:bg-slate-800/60"
+          :disabled="loading"
+          @click="clearSearch"
+        >
+          Clear
         </button>
       </div>
+    </form>
 
-      <div
-        v-if="ghLoading"
-        class="rounded-lg border border-slate-800/80 bg-slate-900/30 px-4 py-8 text-center text-sm text-slate-500"
-      >
-        Loading GitHub…
-      </div>
-
-      <div
-        v-else-if="ghItems.length === 0"
-        class="rounded-lg border border-slate-800/80 bg-slate-900/30 px-4 py-6 text-sm text-slate-500"
-      >
-        No repositories returned. Try again later or adjust your GitHub token.
-      </div>
-
-      <ul
-        v-else
-        class="max-h-[min(560px,60vh)] divide-y divide-slate-800/80 overflow-auto rounded-lg border border-slate-800/90 bg-slate-900/20"
-        role="list"
-      >
-        <li
-          v-for="repo in ghItems"
-          :key="repo.fullName"
-          class="px-3 py-3 hover:bg-slate-900/40"
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <label class="flex items-center gap-2 text-xs text-slate-500">
+          <span>Sort</span>
+          <select
+            v-model="sort"
+            class="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 outline-none focus:border-blue-600/50"
+          >
+            <option value="stars">Stars</option>
+            <option value="updated">Updated</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="rounded border border-slate-600 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+          :disabled="loading || page <= 1"
+          @click="page = Math.max(1, page - 1)"
         >
-          <div class="flex flex-wrap items-baseline justify-between gap-2">
+          Prev
+        </button>
+        <span class="text-xs tabular-nums text-slate-500">{{ page }}</span>
+        <button
+          type="button"
+          class="rounded border border-slate-600 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+          :disabled="loading || !hasNext"
+          @click="page += 1"
+        >
+          Next
+        </button>
+      </div>
+      <span v-if="total > 0" class="text-xs text-slate-600">~{{ total.toLocaleString() }} repos</span>
+      <button
+        type="button"
+        class="rounded border border-slate-600 px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-800/60"
+        :disabled="loading"
+        @click="loadList"
+      >
+        Refresh
+      </button>
+    </div>
+
+    <div
+      v-if="loading"
+      class="rounded-lg border border-slate-800/80 bg-slate-900/30 px-4 py-8 text-center text-sm text-slate-500"
+    >
+      Loading…
+    </div>
+
+    <div
+      v-else-if="items.length === 0"
+      class="rounded-lg border border-slate-800/80 bg-slate-900/30 px-4 py-6 text-sm text-slate-500"
+    >
+      <template v-if="appliedQuery">No matches.</template>
+      <template v-else>Nothing returned.</template>
+    </div>
+
+    <ul
+      v-else
+      class="max-h-[min(560px,60vh)] divide-y divide-slate-800/80 overflow-auto rounded-lg border border-slate-800/90 bg-slate-900/20"
+      role="list"
+    >
+      <li
+        v-for="repo in items"
+        :key="repo.fullName"
+        class="flex flex-col gap-2 px-3 py-3 hover:bg-slate-900/40 sm:flex-row sm:items-start sm:justify-between"
+      >
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-baseline gap-2">
             <a
               :href="repo.htmlUrl"
               target="_blank"
@@ -405,14 +356,34 @@ const tabBtnIdle = 'text-slate-500 hover:bg-slate-800/50 hover:text-slate-300'
             >
               {{ repo.name }}
             </a>
-            <span class="text-[11px] tabular-nums text-slate-500">★ {{ repo.stars.toLocaleString() }}</span>
+            <span class="text-sm tabular-nums text-slate-500">★ {{ repo.stars.toLocaleString() }}</span>
+            <span v-if="repoLikelyInstalled(repo)" class="text-sm font-medium text-emerald-400/90">on disk</span>
           </div>
-          <p class="mt-0.5 font-mono text-[11px] text-slate-600">{{ repo.fullName }}</p>
-          <p v-if="repo.description" class="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-500">
+          <p class="mt-0.5 font-mono text-sm text-slate-600">{{ repo.fullName }}</p>
+          <p v-if="repo.description" class="mt-1 line-clamp-2 text-xs text-slate-500">
             {{ repo.description }}
           </p>
-        </li>
-      </ul>
-    </template>
+        </div>
+        <div class="shrink-0 sm:pt-0.5">
+          <button
+            v-if="repoLikelyInstalled(repo)"
+            type="button"
+            disabled
+            class="cursor-not-allowed rounded border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs text-slate-500"
+          >
+            Installed
+          </button>
+          <button
+            v-else
+            type="button"
+            class="rounded border border-blue-700/80 bg-blue-950/40 px-3 py-1.5 text-xs font-medium text-blue-200 hover:bg-blue-950/70 disabled:cursor-not-allowed disabled:opacity-40"
+            :disabled="installing !== null"
+            @click="installRepo(repo.fullName)"
+          >
+            {{ installing === repo.fullName ? '…' : 'Install' }}
+          </button>
+        </div>
+      </li>
+    </ul>
   </div>
 </template>

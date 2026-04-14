@@ -19,12 +19,17 @@ export type LaunchSpec = {
   env: NodeJS.ProcessEnv
 }
 
+/** Matches `+server.identity` (`server/<identity>/cfg/` under the game install). */
+export function rustServerIdentity(serverId: number): string {
+  return `oxidized_${serverId}`
+}
+
 /**
  * Launches RustDedicated from Steam install or OXIDIZED_RUSTDEDICATED_BIN.
  * If OXIDIZED_SKIP_STEAM_INSTALL=1 and no manual binary, uses a no-op Node process for dev.
  */
 export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string): LaunchSpec {
-  const identity = `oxidized_${server.id}`
+  const identity = rustServerIdentity(server.id)
   const override = process.env.OXIDIZED_RUSTDEDICATED_BIN?.trim()
   const exe = override
     ? path.resolve(override)
@@ -69,6 +74,8 @@ export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string):
       String(server.map_seed),
       '+server.worldsize',
       String(server.map_worldsize),
+      '+server.secure',
+      server.eac_enabled !== 0 ? '1' : '0',
       '+server.identity',
       identity,
     ]
@@ -113,6 +120,7 @@ export function buildRustLaunchSpec(server: GameServerRow, instanceDir: string):
       queryUdp: queryPort,
       rconTcp: server.rcon_port,
       rustPlus: server.companion_enabled !== 0 ? companionPort : 'off',
+      eac: server.eac_enabled !== 0 ? 'on' : 'off',
       args: redactRustLaunchArgs(spec.args),
     })
     return spec

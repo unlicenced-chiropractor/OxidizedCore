@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 
@@ -14,6 +14,8 @@ const route = useRoute()
 const serversStore = useServersStore()
 
 const serversGroupOpen = ref(true)
+const updateAvailable = ref<boolean | null>(null)
+let updatePollTimer: number | null = null
 
 const serversSorted = computed(() => [...serversStore.servers].sort((a, b) => a.id - b.id))
 
@@ -28,6 +30,20 @@ function isServerSidebarActive(serverId: number) {
   return onServerPage.value && Number(route.params.id) === serverId
 }
 
+async function checkForServiceUpdate() {
+  try {
+    const res = await fetch('/api/system/update')
+    const data = (await res.json()) as {
+      ok?: boolean
+      image?: { updateAvailable?: boolean | null }
+    }
+    if (!res.ok || !data.ok) return
+    updateAvailable.value = data.image?.updateAvailable ?? null
+  } catch {
+    // Keep current indicator state on transient network failures.
+  }
+}
+
 watch(
   () => route.name,
   (name) => {
@@ -39,7 +55,17 @@ watch(
 
 onMounted(async () => {
   serversStore.attachSocket()
-  await serversStore.fetchServers()
+  await Promise.all([serversStore.fetchServers(), checkForServiceUpdate()])
+  updatePollTimer = window.setInterval(() => {
+    void checkForServiceUpdate()
+  }, 5 * 60 * 1000)
+})
+
+onUnmounted(() => {
+  if (updatePollTimer !== null) {
+    window.clearInterval(updatePollTimer)
+    updatePollTimer = null
+  }
 })
 </script>
 
@@ -165,6 +191,11 @@ onMounted(async () => {
             />
           </svg>
           <span>Settings</span>
+          <span
+            v-if="updateAvailable === true"
+            class="ml-auto inline-flex h-2.5 w-2.5 rounded-full bg-amber-400"
+            title="A newer service image is available"
+          />
         </RouterLink>
       </nav>
     </aside>

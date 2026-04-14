@@ -48,6 +48,7 @@ import {
   installOxidePluginFromGithubRepo,
   listInstalledOxidePlugins,
 } from './pluginGithubInstall.js'
+import { getDockerImageVersionInfo } from './dockerHubUpdates.js'
 import {
   listUsersCfgEntries,
   normalizeSteamId64,
@@ -159,6 +160,17 @@ app.get('/api/system', (_req, res) => {
     rust: getRustInstallSnapshot(),
     oxideInstalled: detectOxidePresentOnDisk(),
   })
+})
+
+app.get('/api/system/update', async (_req, res) => {
+  try {
+    const image = await getDockerImageVersionInfo()
+    res.json({ ok: true, image })
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    coreWarn('api', 'GET /api/system/update failed', { message })
+    res.status(502).json({ ok: false, error: message })
+  }
 })
 
 app.get('/api/github/oxide-plugins', async (req, res) => {

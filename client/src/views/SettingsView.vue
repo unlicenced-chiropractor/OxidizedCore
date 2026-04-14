@@ -9,6 +9,22 @@ type SettingsPayload = {
   error?: string
 }
 
+type UpdatePayload = {
+  ok: boolean
+  error?: string
+  image?: {
+    repository: string
+    currentTag: string
+    currentDigest: string | null
+    latestTag: 'latest'
+    latestDigest: string | null
+    currentLastUpdated: string | null
+    latestLastUpdated: string | null
+    updateAvailable: boolean | null
+    determination: 'digest' | 'timestamp' | 'unknown'
+  }
+}
+
 const loading = ref(true)
 const saving = ref(false)
 const keyConfigured = ref(false)
@@ -22,6 +38,9 @@ const ghInDatabase = ref(false)
 const githubTokenInput = ref('')
 const ghMessage = ref<string | null>(null)
 const ghError = ref<string | null>(null)
+const checkingUpdate = ref(false)
+const updateError = ref<string | null>(null)
+const updateInfo = ref<UpdatePayload['image'] | null>(null)
 
 function applyPayload(data: SettingsPayload) {
   keyConfigured.value = Boolean(data.rustmapsApiKeyConfigured)
@@ -154,8 +173,27 @@ async function removeGithubToken() {
   }
 }
 
+async function checkForImageUpdate() {
+  checkingUpdate.value = true
+  updateError.value = null
+  try {
+    const res = await fetch('/api/system/update')
+    const data = (await res.json()) as UpdatePayload
+    if (!res.ok || !data.ok || !data.image) {
+      updateError.value = data.error ?? 'Could not check Docker Hub.'
+      return
+    }
+    updateInfo.value = data.image
+  } catch {
+    updateError.value = 'Could not check Docker Hub.'
+  } finally {
+    checkingUpdate.value = false
+  }
+}
+
 onMounted(() => {
   void load()
+  void checkForImageUpdate()
 })
 </script>
 
@@ -218,6 +256,49 @@ onMounted(() => {
 
         <p v-if="message" class="text-base text-slate-400">{{ message }}</p>
         <p v-if="error" class="text-base text-red-300/90" role="alert">{{ error }}</p>
+      </template>
+    </section>
+
+    <section class="space-y-5 rounded-xl border border-slate-800/80 bg-slate-900/25 p-7 sm:p-8">
+      <h2 class="text-base font-semibold text-slate-200">Container updates</h2>
+      <p class="text-base text-slate-500">Checks Docker Hub for a newer `latest` image.</p>
+
+      <div class="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          :disabled="checkingUpdate"
+          class="rounded-lg bg-blue-600 px-5 py-2.5 text-base font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
+          @click="checkForImageUpdate"
+        >
+          {{ checkingUpdate ? 'Checking…' : 'Check for update' }}
+        </button>
+      </div>
+
+      <p v-if="updateError" class="text-base text-red-300/90" role="alert">{{ updateError }}</p>
+
+      <template v-if="updateInfo">
+        <p v-if="updateInfo.updateAvailable === true" class="text-base text-amber-200/90">
+          Newer image available on Docker Hub.
+        </p>
+        <p v-else-if="updateInfo.updateAvailable === false" class="text-base text-emerald-300/90">
+          Running image is up to date.
+        </p>
+        <p v-else class="text-base text-slate-400">
+          Could not determine if update is needed with current image metadata.
+        </p>
+
+        <div class="space-y-1 text-sm text-slate-400">
+          <p><span class="text-slate-500">Repository:</span> {{ updateInfo.repository }}</p>
+          <p><span class="text-slate-500">Current tag:</span> {{ updateInfo.currentTag }}</p>
+          <p><span class="text-slate-500">Latest tag:</span> {{ updateInfo.latestTag }}</p>
+          <p v-if="updateInfo.currentLastUpdated">
+            <span class="text-slate-500">Current updated:</span> {{ updateInfo.currentLastUpdated }}
+          </p>
+          <p v-if="updateInfo.latestLastUpdated">
+            <span class="text-slate-500">Latest updated:</span> {{ updateInfo.latestLastUpdated }}
+          </p>
+          <p><span class="text-slate-500">Decision mode:</span> {{ updateInfo.determination }}</p>
+        </div>
       </template>
     </section>
 

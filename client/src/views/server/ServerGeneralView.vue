@@ -22,6 +22,7 @@ const edit = ref({
   oxide_enabled: false,
   companion_enabled: true,
   eac_enabled: true,
+  autostart: false,
   map_seed: 1,
   map_worldsize: 3500,
   max_players: 100,
@@ -41,6 +42,7 @@ function syncEditFromServer() {
     oxide_enabled: s.oxide_enabled,
     companion_enabled: s.companion_enabled,
     eac_enabled: s.eac_enabled,
+    autostart: s.autostart,
     map_seed: s.map_seed,
     map_worldsize: s.map_worldsize,
     max_players: s.max_players,
@@ -69,6 +71,8 @@ const usersCfgEntries = ref<UserCfgEntry[]>([])
 const newSteamId = ref('')
 const newRole = ref<'ownerid' | 'moderatorid'>('ownerid')
 const usersCfgBusy = ref(false)
+const saveCfgBusy = ref(false)
+const saveCfgMessage = ref<string | null>(null)
 
 const createdDisplay = computed(() => {
   const s = server.value?.created_at
@@ -167,6 +171,46 @@ async function removeUserCfg(steamId: string) {
     usersCfgError.value = 'Remove failed.'
   } finally {
     usersCfgBusy.value = false
+  }
+}
+
+async function saveLiveConfig() {
+  if (!server.value) return
+  saveCfgMessage.value = null
+  if (server.value.status !== 'running') {
+    saveCfgMessage.value = 'Server is offline. Save config is only needed while running.'
+    return
+  }
+  if (!server.value.rcon_enabled) {
+    saveCfgMessage.value = 'RCON is disabled for this server.'
+    return
+  }
+  saveCfgBusy.value = true
+  try {
+    const tryCommand = async (command: string) => {
+      const res = await fetch(`/api/servers/${serverId.value}/rcon`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string; response?: string }
+      return { ok: res.ok, error: data.error, response: data.response }
+    }
+
+    let first = await tryCommand('server.writecfg')
+    if (!first.ok) {
+      const second = await tryCommand('server.writecfg')
+      if (!second.ok) {
+        throw new Error(second.error || first.error || 'Save config command failed')
+      }
+      saveCfgMessage.value = 'Config saved (server.writecfg).'
+      return
+    }
+    saveCfgMessage.value = 'Config saved (server.writecfg).'
+  } catch (e) {
+    saveCfgMessage.value = e instanceof Error ? e.message : 'Save config failed.'
+  } finally {
+    saveCfgBusy.value = false
   }
 }
 
@@ -272,6 +316,7 @@ async function saveEdit() {
     oxide_enabled: edit.value.oxide_enabled,
     companion_enabled: edit.value.companion_enabled,
     eac_enabled: edit.value.eac_enabled,
+    autostart: edit.value.autostart,
     memory_limit_mb: edit.value.memory_limit_mb,
   }
   if (edit.value.rcon_password.trim()) body.rcon_password = edit.value.rcon_password
@@ -369,10 +414,6 @@ async function saveEdit() {
             </dd>
           </div>
           <div>
-            <dt class="text-sm font-medium text-slate-500">RCON host</dt>
-            <dd class="mt-1 font-mono text-base text-slate-200">{{ server.host || '—' }}</dd>
-          </div>
-          <div>
             <dt class="text-sm font-medium text-slate-500">Created</dt>
             <dd class="mt-1 text-base text-slate-300">{{ createdDisplay }}</dd>
           </div>
@@ -441,6 +482,10 @@ async function saveEdit() {
           <div>
             <dt class="text-sm font-medium text-slate-500">EAC</dt>
             <dd class="mt-1 text-base text-slate-200">{{ server.eac_enabled ? 'On' : 'Off' }}</dd>
+          </div>
+          <div>
+            <dt class="text-sm font-medium text-slate-500">Autostart</dt>
+            <dd class="mt-1 text-base text-slate-200">{{ server.autostart ? 'On' : 'Off' }}</dd>
           </div>
           <div class="sm:col-span-2">
             <dt class="text-sm font-medium text-slate-500">RAM limit</dt>
@@ -514,6 +559,10 @@ async function saveEdit() {
         <input v-model="edit.eac_enabled" type="checkbox" class="h-5 w-5 rounded border-slate-600 bg-slate-950 text-blue-600" />
         <span class="text-base text-slate-400">EAC</span>
       </label>
+      <label class="flex cursor-pointer items-center gap-3 sm:col-span-2">
+        <input v-model="edit.autostart" type="checkbox" class="h-5 w-5 rounded border-slate-600 bg-slate-950 text-blue-600" />
+        <span class="text-base text-slate-400">Autostart on container boot</span>
+      </label>
       <label class="block">
         <span class="text-sm font-medium text-slate-400">Map seed</span>
         <input
@@ -564,6 +613,19 @@ async function saveEdit() {
     <section class="space-y-5 border-t border-slate-800/60 pt-10">
       <h2 class="text-lg font-semibold text-slate-200">Admins (users.cfg)</h2>
       <p v-if="usersCfgPath" class="font-mono text-sm text-slate-600 break-all">{{ usersCfgPath }}</p>
+
+      <div class="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          class="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800/60 disabled:opacity-50"
+          :disabled="saveCfgBusy || server?.status !== 'running'"
+          @click="saveLiveConfig"
+        >
+          {{ saveCfgBusy ? 'Saving…' : 'Save cfg now' }}
+        </button>
+        <p class="text-xs text-slate-500">Use while server is running to persist live changes.</p>
+      </div>
+      <p v-if="saveCfgMessage" class="text-sm text-slate-400">{{ saveCfgMessage }}</p>
 
       <form class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end" @submit.prevent="addUserCfg">
         <label class="block min-w-[12rem] flex-1">

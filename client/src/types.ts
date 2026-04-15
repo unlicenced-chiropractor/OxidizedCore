@@ -28,6 +28,8 @@ export type GameServer = {
   companion_enabled: boolean
   /** When true, EAC is enabled (+server.secure 1). */
   eac_enabled: boolean
+  /** When true, starts automatically when panel container boots. */
+  autostart: boolean
   /** UDP — query / server browser (open in firewall alongside game UDP). */
   query_port: number
   /** TCP — Rust+ companion (optional for joining via F1). */

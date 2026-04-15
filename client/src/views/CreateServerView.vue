@@ -22,7 +22,6 @@ const form = reactive({
   name: '',
   server_description: '',
   max_players: 100,
-  host: '127.0.0.1',
   game_port: 28015,
   rcon_port: 28016,
   rcon_enabled: true,
@@ -30,12 +29,16 @@ const form = reactive({
   oxide_enabled: false,
   companion_enabled: true,
   eac_enabled: true,
+  autostart: false,
   map_seed: randomSeed(),
   map_worldsize: 3500,
   memory_limit_mb: null as number | null,
 })
 const formError = ref<string | null>(null)
 const submitting = ref(false)
+type CreateTab = 'basic' | 'map' | 'network' | 'features' | 'finish'
+const activeTab = ref<CreateTab>('basic')
+const tabOrder: CreateTab[] = ['basic', 'map', 'network', 'features', 'finish']
 
 const mapPreviewUrl = ref<string | null>(null)
 const mapPreviewError = ref<string | null>(null)
@@ -45,6 +48,7 @@ const previewReady = computed(() => mapPreviewUrl.value !== null)
 
 const queryPort = computed(() => fallbackQueryPort(form.game_port, form.rcon_port))
 const companionTcpPort = computed(() => fallbackCompanionTcpPort(form.game_port, form.rcon_port))
+const isFinishTab = computed(() => activeTab.value === 'finish')
 
 watch(
   () => [form.map_seed, form.map_worldsize] as const,
@@ -100,7 +104,6 @@ async function onSubmit() {
   try {
     await store.createServer({
       name: form.name.trim(),
-      host: form.host.trim() || undefined,
       game_port: form.game_port,
       rcon_port: form.rcon_port,
       rcon_password: form.rcon_enabled ? form.rcon_password : '',
@@ -108,6 +111,7 @@ async function onSubmit() {
       oxide_enabled: form.oxide_enabled,
       companion_enabled: form.companion_enabled,
       eac_enabled: form.eac_enabled,
+      autostart: form.autostart,
       map_seed: Math.floor(form.map_seed),
       map_worldsize: Math.floor(form.map_worldsize),
       max_players: Math.floor(form.max_players),
@@ -120,6 +124,16 @@ async function onSubmit() {
   } finally {
     submitting.value = false
   }
+}
+
+function goToNextTab() {
+  const idx = tabOrder.indexOf(activeTab.value)
+  if (idx >= 0 && idx < tabOrder.length - 1) activeTab.value = tabOrder[idx + 1]!
+}
+
+function goToPrevTab() {
+  const idx = tabOrder.indexOf(activeTab.value)
+  if (idx > 0) activeTab.value = tabOrder[idx - 1]!
 }
 </script>
 
@@ -145,8 +159,54 @@ async function onSubmit() {
       </div>
     </header>
 
-    <form class="space-y-10" @submit.prevent="onSubmit">
+    <form class="space-y-7" @submit.prevent="onSubmit">
+      <div class="rounded-2xl border border-slate-800/70 bg-slate-900/30 p-2">
+        <div class="flex gap-2 overflow-x-auto whitespace-nowrap">
+          <button
+            type="button"
+            class="rounded-xl px-4 py-2.5 text-sm font-semibold transition whitespace-nowrap"
+            :class="activeTab === 'basic' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/50' : 'bg-slate-900/50 text-slate-300 hover:bg-slate-800/70'"
+            @click="activeTab = 'basic'"
+          >
+            Basics
+          </button>
+          <button
+            type="button"
+            class="rounded-xl px-4 py-2.5 text-sm font-semibold transition whitespace-nowrap"
+            :class="activeTab === 'map' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/50' : 'bg-slate-900/50 text-slate-300 hover:bg-slate-800/70'"
+            @click="activeTab = 'map'"
+          >
+            Map
+          </button>
+          <button
+            type="button"
+            class="rounded-xl px-4 py-2.5 text-sm font-semibold transition whitespace-nowrap"
+            :class="activeTab === 'network' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/50' : 'bg-slate-900/50 text-slate-300 hover:bg-slate-800/70'"
+            @click="activeTab = 'network'"
+          >
+            Network
+          </button>
+          <button
+            type="button"
+            class="rounded-xl px-4 py-2.5 text-sm font-semibold transition whitespace-nowrap"
+            :class="activeTab === 'features' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/50' : 'bg-slate-900/50 text-slate-300 hover:bg-slate-800/70'"
+            @click="activeTab = 'features'"
+          >
+            Features
+          </button>
+          <button
+            type="button"
+            class="rounded-xl px-4 py-2.5 text-sm font-semibold transition whitespace-nowrap"
+            :class="activeTab === 'finish' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/50' : 'bg-slate-900/50 text-slate-300 hover:bg-slate-800/70'"
+            @click="activeTab = 'finish'"
+          >
+            Finish
+          </button>
+        </div>
+      </div>
+
       <div
+        v-show="activeTab === 'basic'"
         class="rounded-2xl border border-slate-800/70 bg-slate-900/20 px-5 py-6 sm:px-8 sm:py-8"
       >
         <div class="grid gap-6 sm:grid-cols-2 sm:gap-x-8 sm:gap-y-5">
@@ -205,7 +265,10 @@ async function onSubmit() {
         </div>
       </div>
 
-      <div class="rounded-2xl border border-slate-800/70 bg-slate-900/20 px-5 py-6 sm:px-8 sm:py-8">
+      <div
+        v-show="activeTab === 'map'"
+        class="rounded-2xl border border-slate-800/70 bg-slate-900/20 px-5 py-6 sm:px-8 sm:py-8"
+      >
         <p class="mb-5 text-sm font-medium uppercase tracking-wide text-slate-500">Map</p>
         <div class="grid gap-4 sm:grid-cols-2 sm:gap-x-6">
           <label class="block">
@@ -279,7 +342,10 @@ async function onSubmit() {
         </div>
       </div>
 
-      <div class="rounded-2xl border border-slate-800/70 bg-slate-900/20 px-5 py-6 sm:px-8 sm:py-8">
+      <div
+        v-show="activeTab === 'network'"
+        class="rounded-2xl border border-slate-800/70 bg-slate-900/20 px-5 py-6 sm:px-8 sm:py-8"
+      >
         <p class="mb-5 text-sm font-medium uppercase tracking-wide text-slate-500">Ports</p>
         <div class="grid gap-4 sm:grid-cols-2 sm:gap-x-6">
           <label class="block">
@@ -310,8 +376,14 @@ async function onSubmit() {
           }}<template v-if="form.companion_enabled"> · Rust+ TCP {{ companionTcpPort }}</template
           ><template v-else> · Rust+ off</template>
         </p>
+      </div>
 
-        <div class="mt-6 border-t border-slate-800/50 pt-5">
+      <div
+        v-show="activeTab === 'features'"
+        class="rounded-2xl border border-slate-800/70 bg-slate-900/20 px-5 py-6 sm:px-8 sm:py-8"
+      >
+        <p class="mb-5 text-sm font-medium uppercase tracking-wide text-slate-500">Features</p>
+        <div class="border-t border-slate-800/50 pt-5">
           <label class="flex cursor-pointer items-center gap-3">
             <input
               v-model="form.rcon_enabled"
@@ -344,18 +416,15 @@ async function onSubmit() {
             />
             <span class="text-base text-slate-300">EAC</span>
           </label>
+          <label class="mt-4 flex cursor-pointer items-center gap-3">
+            <input
+              v-model="form.autostart"
+              type="checkbox"
+              class="h-4 w-4 rounded border-slate-600 bg-slate-950 text-blue-600"
+            />
+            <span class="text-base text-slate-300">Autostart on container boot</span>
+          </label>
           <div v-if="form.rcon_enabled" class="mt-4 grid gap-4 sm:grid-cols-2 sm:gap-x-6">
-            <label class="block sm:col-span-2">
-              <span class="text-xs text-slate-500">RCON host</span>
-              <input
-                v-model="form.host"
-                type="text"
-                required
-                autocomplete="off"
-                placeholder="127.0.0.1"
-                class="mt-1.5 w-full rounded-lg border border-slate-700/80 bg-slate-950 px-3 py-2.5 font-mono text-sm outline-none focus:border-blue-600/60 focus:ring-1 focus:ring-blue-600/25"
-              />
-            </label>
             <label class="block sm:col-span-2">
               <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-slate-500">Password</span>
@@ -379,10 +448,102 @@ async function onSubmit() {
         </div>
       </div>
 
+      <div
+        v-show="activeTab === 'finish'"
+        class="rounded-2xl border border-slate-800/70 bg-slate-900/20 px-5 py-6 sm:px-8 sm:py-8"
+      >
+        <p class="mb-5 text-sm font-medium uppercase tracking-wide text-slate-500">Review</p>
+        <dl class="grid gap-4 sm:grid-cols-2">
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Name</dt>
+            <dd class="mt-1 text-slate-200">{{ form.name || '—' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Description</dt>
+            <dd class="mt-1 text-slate-200">{{ form.server_description || '—' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Max players</dt>
+            <dd class="mt-1 text-slate-200">{{ form.max_players }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">RAM limit</dt>
+            <dd class="mt-1 text-slate-200">
+              <template v-if="form.memory_limit_mb != null">{{ form.memory_limit_mb }} MiB</template>
+              <template v-else>No limit</template>
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Map seed</dt>
+            <dd class="mt-1 font-mono text-slate-200">{{ form.map_seed }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Map size</dt>
+            <dd class="mt-1 text-slate-200">{{ form.map_worldsize }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Game UDP</dt>
+            <dd class="mt-1 font-mono text-slate-200">{{ form.game_port }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">RCON TCP</dt>
+            <dd class="mt-1 font-mono text-slate-200">{{ form.rcon_port }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Query UDP</dt>
+            <dd class="mt-1 font-mono text-slate-200">{{ queryPort }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Rust+ TCP</dt>
+            <dd class="mt-1 font-mono text-slate-200">
+              {{ form.companion_enabled ? companionTcpPort : 'Off' }}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">RCON</dt>
+            <dd class="mt-1 text-slate-200">{{ form.rcon_enabled ? 'On' : 'Off' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Oxide</dt>
+            <dd class="mt-1 text-slate-200">{{ form.oxide_enabled ? 'On' : 'Off' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Rust+</dt>
+            <dd class="mt-1 text-slate-200">{{ form.companion_enabled ? 'On' : 'Off' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">EAC</dt>
+            <dd class="mt-1 text-slate-200">{{ form.eac_enabled ? 'On' : 'Off' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Autostart</dt>
+            <dd class="mt-1 text-slate-200">{{ form.autostart ? 'On' : 'Off' }}</dd>
+          </div>
+        </dl>
+      </div>
+
       <p v-if="formError" class="text-sm text-red-300/90" role="alert">{{ formError }}</p>
 
       <div class="flex flex-wrap gap-3 pt-1">
         <button
+          type="button"
+          class="rounded-lg border border-slate-600/80 px-5 py-2.5 text-sm text-slate-300 hover:bg-slate-800/40 disabled:opacity-40"
+          :disabled="activeTab === 'basic' || submitting"
+          @click="goToPrevTab"
+        >
+          Back
+        </button>
+        <button
+          v-if="!isFinishTab"
+          type="button"
+          :disabled="submitting"
+          class="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-[background-color,transform] duration-200 hover:bg-blue-500 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40"
+          @click="goToNextTab"
+        >
+          Finish
+        </button>
+        <button
+          v-else
           type="submit"
           :disabled="submitting"
           class="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-[background-color,transform] duration-200 hover:bg-blue-500 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40"

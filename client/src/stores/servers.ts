@@ -92,6 +92,7 @@ export const useServersStore = defineStore('servers', () => {
         oxide_enabled: typeof s.oxide_enabled === 'boolean' ? s.oxide_enabled : false,
         companion_enabled: typeof s.companion_enabled === 'boolean' ? s.companion_enabled : true,
         eac_enabled: typeof s.eac_enabled === 'boolean' ? s.eac_enabled : true,
+        autostart: typeof s.autostart === 'boolean' ? s.autostart : false,
         memory_limit_mb:
           typeof s.memory_limit_mb === 'number' && Number.isFinite(s.memory_limit_mb)
             ? s.memory_limit_mb
@@ -147,6 +148,7 @@ export const useServersStore = defineStore('servers', () => {
         oxide_enabled: typeof s.oxide_enabled === 'boolean' ? s.oxide_enabled : false,
         companion_enabled: typeof s.companion_enabled === 'boolean' ? s.companion_enabled : true,
         eac_enabled: typeof s.eac_enabled === 'boolean' ? s.eac_enabled : true,
+        autostart: typeof s.autostart === 'boolean' ? s.autostart : false,
         memory_limit_mb:
           typeof s.memory_limit_mb === 'number' && Number.isFinite(s.memory_limit_mb)
             ? s.memory_limit_mb
@@ -184,6 +186,7 @@ export const useServersStore = defineStore('servers', () => {
     rcon_port: number
     rcon_password: string
     rcon_enabled?: boolean
+    autostart?: boolean
     map_seed: number
     map_worldsize: number
     max_players?: number
@@ -211,6 +214,7 @@ export const useServersStore = defineStore('servers', () => {
       rcon_port: number
       rcon_password: string
       rcon_enabled: boolean
+      autostart: boolean
       map_seed: number
       map_worldsize: number
       max_players: number

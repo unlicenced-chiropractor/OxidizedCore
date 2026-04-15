@@ -66,6 +66,16 @@ export function isInstanceRunning(id: number): boolean {
   return c !== undefined && !c.killed
 }
 
+export function listRunningInstancePids(): Array<{ serverId: number; pid: number }> {
+  const out: Array<{ serverId: number; pid: number }> = []
+  for (const [serverId, child] of children.entries()) {
+    if (typeof child.pid === 'number' && child.pid > 0 && !child.killed) {
+      out.push({ serverId, pid: child.pid })
+    }
+  }
+  return out
+}
+
 function attachExitHandler(
   id: number,
   child: ChildProcess,

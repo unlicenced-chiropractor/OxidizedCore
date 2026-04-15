@@ -23,6 +23,8 @@ export type GameServerRow = {
   companion_enabled: number
   /** 0 or 1 — EAC enabled/disabled (+server.secure). */
   eac_enabled: number
+  /** 0 or 1 — start this server automatically when the panel boots. */
+  autostart: number
   /** Optional RAM cap for the game process (MiB); null = unlimited. */
   memory_limit_mb: number | null
   /** Procedural map (+server.seed). */
@@ -41,12 +43,13 @@ export type GameServerRow = {
 
 export type GameServerPublic = Omit<
   GameServerRow,
-  'rcon_password' | 'rcon_enabled' | 'oxide_enabled' | 'companion_enabled' | 'eac_enabled'
+  'rcon_password' | 'rcon_enabled' | 'oxide_enabled' | 'companion_enabled' | 'eac_enabled' | 'autostart'
 > & {
   rcon_enabled: boolean
   oxide_enabled: boolean
   companion_enabled: boolean
   eac_enabled: boolean
+  autostart: boolean
   /** UDP — Steam query / server list (same rules as +server.queryport). */
   query_port: number
   /** TCP — Rust+ companion (forward for mobile app; not required for F1 connect). */
@@ -61,6 +64,7 @@ export function toPublic(row: GameServerRow): GameServerPublic {
     oxide_enabled: oxide_enabled !== 0,
     companion_enabled: companion_enabled !== 0,
     eac_enabled: eac_enabled !== 0,
+    autostart: row.autostart !== 0,
     query_port: effectiveQueryPort(row.game_port, row.rcon_port),
     companion_tcp_port: rustCompanionTcpPort(row.game_port, row.rcon_port),
   }
@@ -152,6 +156,9 @@ function migrateServersTable(database: Database.Database) {
   if (!names.has('memory_limit_mb')) {
     database.exec(`ALTER TABLE servers ADD COLUMN memory_limit_mb INTEGER`)
   }
+  if (!names.has('autostart')) {
+    database.exec(`ALTER TABLE servers ADD COLUMN autostart INTEGER NOT NULL DEFAULT 0`)
+  }
 }
 
 let db: Database.Database | null = null
@@ -192,14 +199,15 @@ export function insertServer(
     oxide_enabled: number
     companion_enabled: number
     eac_enabled: number
+    autostart: number
     memory_limit_mb: number | null
     status?: ServerStatus
   }
 ): GameServerRow {
   const status = row.status ?? 'stopped'
   const insert = database.prepare(
-    `INSERT INTO servers (name, host, game_port, rcon_port, rcon_password, rcon_enabled, oxide_enabled, companion_enabled, eac_enabled, memory_limit_mb, map_seed, map_worldsize, max_players, server_description, status)
-     VALUES (@name, @host, @game_port, @rcon_port, @rcon_password, @rcon_enabled, @oxide_enabled, @companion_enabled, @eac_enabled, @memory_limit_mb, @map_seed, @map_worldsize, @max_players, @server_description, @status)`
+    `INSERT INTO servers (name, host, game_port, rcon_port, rcon_password, rcon_enabled, oxide_enabled, companion_enabled, eac_enabled, autostart, memory_limit_mb, map_seed, map_worldsize, max_players, server_description, status)
+     VALUES (@name, @host, @game_port, @rcon_port, @rcon_password, @rcon_enabled, @oxide_enabled, @companion_enabled, @eac_enabled, @autostart, @memory_limit_mb, @map_seed, @map_worldsize, @max_players, @server_description, @status)`
   )
   let newId = 0
   const tx = database.transaction(() => {
@@ -213,6 +221,7 @@ export function insertServer(
       oxide_enabled: row.oxide_enabled,
       companion_enabled: row.companion_enabled,
       eac_enabled: row.eac_enabled,
+      autostart: row.autostart,
       memory_limit_mb: row.memory_limit_mb ?? null,
       map_seed: row.map_seed,
       map_worldsize: row.map_worldsize,
@@ -245,6 +254,7 @@ export function updateServer(
       | 'oxide_enabled'
       | 'companion_enabled'
       | 'eac_enabled'
+      | 'autostart'
       | 'memory_limit_mb'
       | 'map_seed'
       | 'map_worldsize'
@@ -266,6 +276,7 @@ export function updateServer(
     oxide_enabled: row.oxide_enabled ?? existing.oxide_enabled,
     companion_enabled: row.companion_enabled ?? existing.companion_enabled,
     eac_enabled: row.eac_enabled ?? existing.eac_enabled,
+    autostart: row.autostart ?? existing.autostart,
     memory_limit_mb: row.memory_limit_mb !== undefined ? row.memory_limit_mb : existing.memory_limit_mb,
     map_seed: row.map_seed ?? existing.map_seed,
     map_worldsize: row.map_worldsize ?? existing.map_worldsize,
@@ -277,7 +288,7 @@ export function updateServer(
     .prepare(
       `UPDATE servers SET name = @name, host = @host, game_port = @game_port,
        rcon_port = @rcon_port, rcon_password = @rcon_password, rcon_enabled = @rcon_enabled, oxide_enabled = @oxide_enabled,
-       companion_enabled = @companion_enabled, eac_enabled = @eac_enabled,
+       companion_enabled = @companion_enabled, eac_enabled = @eac_enabled, autostart = @autostart,
        memory_limit_mb = @memory_limit_mb,
        map_seed = @map_seed, map_worldsize = @map_worldsize, max_players = @max_players,
        server_description = @server_description, status = @status WHERE id = @id`

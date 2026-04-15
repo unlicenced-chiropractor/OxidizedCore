@@ -23,6 +23,7 @@ import {
   stopInstance,
   stopInstanceSyncIfRunning,
 } from './instanceSupervisor.js'
+import { getSystemMetricsSnapshot } from './systemMetrics.js'
 import { sendRconCommand } from './rcon.js'
 import { coreLog, coreWarn } from './log.js'
 import { setLogBroadcasters } from './logBroadcaster.js'
@@ -150,6 +151,17 @@ setLogBroadcasters({
 })
 
 reconcileOrphanStatuses(database, emitServersUpdated)
+setTimeout(() => {
+  const autostartRows = listServers(database).filter((s) => s.autostart !== 0)
+  for (const row of autostartRows) {
+    void startInstance(row, database, emitServersUpdated).catch((e) => {
+      coreWarn('boot', 'Autostart failed', {
+        serverId: row.id,
+        message: e instanceof Error ? e.message : String(e),
+      })
+    })
+  }
+}, 250)
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
@@ -160,6 +172,17 @@ app.get('/api/system', (_req, res) => {
     rust: getRustInstallSnapshot(),
     oxideInstalled: detectOxidePresentOnDisk(),
   })
+})
+
+app.get('/api/system/metrics', async (_req, res) => {
+  try {
+    const snapshot = await getSystemMetricsSnapshot()
+    res.json({ ok: true, snapshot })
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    coreWarn('api', 'GET /api/system/metrics failed', { message })
+    res.status(500).json({ ok: false, error: message })
+  }
 })
 
 app.get('/api/system/update', async (_req, res) => {
@@ -497,6 +520,7 @@ app.post('/api/servers', (req, res) => {
     oxide_enabled: bodyOxideEnabled,
     companion_enabled: bodyCompanionEnabled,
     eac_enabled: bodyEacEnabled,
+    autostart: bodyAutostart,
     memory_limit_mb: bodyMemoryLimitMb,
   } = req.body ?? {}
   coreLog('api', 'POST /api/servers (create)', { name, game_port, rcon_port, map_seed, map_worldsize })
@@ -515,6 +539,7 @@ app.post('/api/servers', (req, res) => {
   const oxideEnabled = bodyOxideEnabled === true
   const companionEnabled = bodyCompanionEnabled === false ? false : true
   const eacEnabled = bodyEacEnabled === false ? false : true
+  const autostart = bodyAutostart === true
   const maxPlayers =
     typeof bodyMaxPlayers === 'number' && Number.isInteger(bodyMaxPlayers) ? bodyMaxPlayers : 100
   const serverDescription =
@@ -566,6 +591,7 @@ app.post('/api/servers', (req, res) => {
     oxide_enabled: oxideEnabled ? 1 : 0,
     companion_enabled: companionEnabled ? 1 : 0,
     eac_enabled: eacEnabled ? 1 : 0,
+    autostart: autostart ? 1 : 0,
     map_seed,
     map_worldsize,
     max_players: maxPlayers,
@@ -675,6 +701,7 @@ app.patch('/api/servers/:id', (req, res) => {
     oxide_enabled: bodyOxideEnabled,
     companion_enabled: bodyCompanionEnabled,
     eac_enabled: bodyEacEnabled,
+    autostart: bodyAutostart,
     memory_limit_mb: bodyMemoryLimitMb,
   } = req.body ?? {}
   const patch: Parameters<typeof updateServer>[2] = {}
@@ -724,6 +751,9 @@ app.patch('/api/servers/:id', (req, res) => {
   }
   if (typeof bodyEacEnabled === 'boolean') {
     patch.eac_enabled = bodyEacEnabled ? 1 : 0
+  }
+  if (typeof bodyAutostart === 'boolean') {
+    patch.autostart = bodyAutostart ? 1 : 0
   }
   if ('memory_limit_mb' in (req.body ?? {})) {
     const raw = bodyMemoryLimitMb

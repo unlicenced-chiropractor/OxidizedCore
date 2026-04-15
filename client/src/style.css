@@ -31,28 +31,12 @@ body {
     Arial,
     sans-serif;
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
-  @apply bg-black text-slate-200 antialiased;
+  @apply bg-slate-900 text-slate-200 antialiased;
 }
 
 #app {
   min-height: 100vh;
-  background-color: #000;
-}
-
-/* Force a true-black theme across Tailwind utility backgrounds used in the UI. */
-[class*='bg-slate-'],
-[class*='bg-zinc-'],
-[class*='bg-gray-'],
-[class*='bg-neutral-'],
-[class~='bg-white'] {
-  background-color: #000 !important;
-}
-
-[class*='border-slate-'],
-[class*='border-zinc-'],
-[class*='border-gray-'],
-[class*='border-neutral-'] {
-  border-color: rgba(255, 255, 255, 0.22) !important;
+  background-color: rgb(15 23 42);
 }
 
 ::selection {

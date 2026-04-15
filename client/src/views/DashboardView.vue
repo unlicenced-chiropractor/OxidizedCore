@@ -1,11 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import type { ServerStatus } from '@/types'
 
 const store = useServersStore()
 const busyId = ref<number | null>(null)
+const metricsLoading = ref(false)
+const metricsError = ref<string | null>(null)
+const metrics = ref<{
+  timestamp: string
+  host: {
+    cpuCores: number
+    totalMemMb: number
+    freeMemMb: number
+    usedMemMb: number
+  }
+  servers: Array<{ serverId: number; pid: number; cpuPercent: number | null; memoryMb: number | null }>
+} | null>(null)
+let metricsTimer: number | null = null
 
 const serversSorted = computed(() =>
   [...store.servers].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id - b.id)
@@ -25,9 +38,65 @@ const summaryLine = computed(() => {
   return parts.join(' · ')
 })
 
+const hostMemoryPercent = computed(() => {
+  const m = metrics.value
+  if (!m || m.host.totalMemMb <= 0) return null
+  return (m.host.usedMemMb / m.host.totalMemMb) * 100
+})
+
+const serverMetricsById = computed(() => {
+  const map = new Map<number, { cpuPercent: number | null; memoryMb: number | null; pid: number }>()
+  for (const m of metrics.value?.servers ?? []) {
+    map.set(m.serverId, { cpuPercent: m.cpuPercent, memoryMb: m.memoryMb, pid: m.pid })
+  }
+  return map
+})
+
+function fmtMb(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  return `${Math.round(v).toLocaleString()} MB`
+}
+
+function fmtPct(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  return `${v.toFixed(1)}%`
+}
+
+async function fetchMetrics() {
+  metricsLoading.value = true
+  try {
+    const res = await fetch('/api/system/metrics')
+    const data = (await res.json()) as {
+      ok?: boolean
+      error?: string
+      snapshot?: typeof metrics.value
+    }
+    if (!res.ok || !data.ok || !data.snapshot) {
+      metricsError.value = data.error ?? 'Could not load metrics.'
+      return
+    }
+    metricsError.value = null
+    metrics.value = data.snapshot
+  } catch {
+    metricsError.value = 'Could not load metrics.'
+  } finally {
+    metricsLoading.value = false
+  }
+}
+
 onMounted(async () => {
   store.attachSocket()
-  await Promise.all([store.fetchServers(), store.fetchSystem()])
+  await Promise.all([store.fetchServers(), store.fetchSystem(), fetchMetrics()])
+  metricsTimer = window.setInterval(() => {
+    void fetchMetrics()
+  }, 5000)
+})
+
+onUnmounted(() => {
+  if (metricsTimer !== null) {
+    window.clearInterval(metricsTimer)
+    metricsTimer = null
+  }
 })
 
 async function onDelete(id: number) {
@@ -145,6 +214,31 @@ async function onStop(id: number) {
       </RouterLink>
     </header>
 
+    <section class="grid gap-4 md:grid-cols-3">
+      <article class="rounded-xl border border-slate-800/80 bg-slate-900/30 p-4">
+        <p class="text-xs uppercase tracking-wider text-slate-500">Host memory</p>
+        <p class="mt-2 text-xl font-semibold text-slate-100">
+          {{ hostMemoryPercent == null ? '—' : `${hostMemoryPercent.toFixed(1)}%` }}
+        </p>
+        <p class="mt-1 text-sm text-slate-500">
+          {{ metrics ? `${fmtMb(metrics.host.usedMemMb)} / ${fmtMb(metrics.host.totalMemMb)}` : '—' }}
+        </p>
+      </article>
+      <article class="rounded-xl border border-slate-800/80 bg-slate-900/30 p-4">
+        <p class="text-xs uppercase tracking-wider text-slate-500">Host CPU cores</p>
+        <p class="mt-2 text-xl font-semibold text-slate-100">{{ metrics?.host.cpuCores ?? '—' }}</p>
+        <p class="mt-1 text-sm text-slate-500">Running server processes: {{ metrics?.servers.length ?? 0 }}</p>
+      </article>
+      <article class="rounded-xl border border-slate-800/80 bg-slate-900/30 p-4">
+        <p class="text-xs uppercase tracking-wider text-slate-500">Metrics status</p>
+        <p class="mt-2 text-sm font-medium text-slate-200">
+          <span v-if="metricsLoading">Refreshing…</span>
+          <span v-else-if="metricsError">{{ metricsError }}</span>
+          <span v-else>Updated {{ metrics?.timestamp ? new Date(metrics.timestamp).toLocaleTimeString() : '—' }}</span>
+        </p>
+      </article>
+    </section>
+
     <div v-if="store.loading" class="grid gap-5 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true">
       <div
         v-for="n in 6"
@@ -220,6 +314,17 @@ async function onStop(id: number) {
           Map {{ s.map_worldsize.toLocaleString() }} · Seed {{ s.map_seed.toLocaleString() }} ·
           {{ s.max_players.toLocaleString() }} players
         </p>
+
+        <div class="mt-3 grid grid-cols-2 gap-3 text-xs">
+          <div class="rounded-lg border border-slate-800/70 bg-slate-900/40 px-3 py-2">
+            <p class="uppercase tracking-wide text-slate-500">CPU</p>
+            <p class="mt-1 text-sm text-slate-200">{{ fmtPct(serverMetricsById.get(s.id)?.cpuPercent) }}</p>
+          </div>
+          <div class="rounded-lg border border-slate-800/70 bg-slate-900/40 px-3 py-2">
+            <p class="uppercase tracking-wide text-slate-500">Memory</p>
+            <p class="mt-1 text-sm text-slate-200">{{ fmtMb(serverMetricsById.get(s.id)?.memoryMb) }}</p>
+          </div>
+        </div>
 
         <div class="mt-6 flex flex-wrap gap-2.5 border-t border-slate-800/80 pt-5">
           <button
